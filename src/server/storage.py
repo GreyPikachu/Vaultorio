@@ -222,7 +222,12 @@ class SaveStorageManager:
             logger.error("Failed to compute SHA-256 for %s: %s", file_path, exc)
             raise StorageError(f"SHA-256 computation failed: {exc}") from exc
 
-    def save_new_world_atomic(self, temp_file_path: Path, uploaded_by: str) -> Dict[str, Any]:
+    def save_new_world_atomic(
+        self,
+        temp_file_path: Path,
+        uploaded_by: str,
+        mod_list: Optional[Any] = None,
+    ) -> Dict[str, Any]:
         """
         Atomically replaces the active cloud world save file with a new version.
         Guaranteed thread-safe and crash-resistant:
@@ -231,11 +236,12 @@ class SaveStorageManager:
         3. If changed, performs circular backup rotation:
            backup_2 -> backup_3, backup_1 -> backup_2, current -> backup_1.
         4. Atomically replaces current_save_path via os.replace.
-        5. Updates and persists save_metadata.json.
+        5. Updates and persists save_metadata.json (including mod_list if provided).
 
         Args:
             temp_file_path: Path to the newly uploaded temporary archive.
             uploaded_by: Unique player nickname / identifier.
+            mod_list: Optional list or dictionary of active mods.
 
         Returns:
             Dict[str, Any]: Save metadata details.
@@ -320,8 +326,63 @@ class SaveStorageManager:
                 "version_counter": new_version,
             }
 
+            if mod_list is not None:
+                new_metadata["mod_list"] = mod_list
+                # Also persist mod-list.json for standalone access
+                try:
+                    self._save_mod_manifest_locked(mod_list)
+                except Exception as mod_err:
+                    logger.warning("Could not persist separate mod-list.json: %s", mod_err)
+
             self._write_metadata_file_locked(new_metadata)
             return new_metadata
+
+    def get_mod_manifest(self) -> Dict[str, Any]:
+        """
+        Retrieves the active mod manifest either from save metadata or mod-list.json.
+
+        Returns:
+            Dict[str, Any]: {"exists": bool, "mod_list": Optional[Any]}
+        """
+        with self._lock:
+            meta = self._get_current_save_metadata_locked()
+            if meta.get("exists") and "mod_list" in meta and meta["mod_list"] is not None:
+                return {"exists": True, "mod_list": meta["mod_list"]}
+
+            mod_file = self.config.storage_dir / "mod-list.json"
+            if mod_file.exists():
+                try:
+                    with open(mod_file, "r", encoding="utf-8") as f:
+                        return {"exists": True, "mod_list": json.load(f)}
+                except Exception as exc:
+                    logger.warning("Failed to read mod-list.json: %s", exc)
+
+            return {"exists": False, "mod_list": None}
+
+    def save_mod_manifest(self, mod_list: Any) -> None:
+        """
+        Atomically saves standalone mod-list.json manifest to the storage directory.
+
+        Args:
+            mod_list: List or dictionary representing mod configuration.
+        """
+        with self._lock:
+            self._save_mod_manifest_locked(mod_list)
+
+    def _save_mod_manifest_locked(self, mod_list: Any) -> None:
+        """Internal helper to atomically write mod-list.json while holding lock."""
+        mod_file = self.config.storage_dir / "mod-list.json"
+        tmp_file = mod_file.with_suffix(".tmp")
+        try:
+            with open(tmp_file, "w", encoding="utf-8") as f:
+                json.dump(mod_list, f, indent=2, ensure_ascii=False)
+            os.replace(str(tmp_file), str(mod_file))
+            logger.debug("Saved mod manifest to %s", mod_file)
+        except Exception as exc:
+            if tmp_file.exists():
+                tmp_file.unlink(missing_ok=True)
+            logger.error("Failed to write mod manifest to %s: %s", mod_file, exc)
+            raise StorageError(f"Failed to persist mod manifest: {exc}") from exc
 
     def _rotate_backups_locked(self) -> None:
         """
