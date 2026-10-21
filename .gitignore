@@ -1,0 +1,20 @@
+# Игнорируем папку с системными промптами (агентами)
+.agents/
+.memory_bank/
+
+# Python & Environment
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.env
+venv/
+.venv/
+
+# OS & Build artifacts
+.DS_Store
+Thumbs.db
+data/
+*.egg-info/
+dist/
+build/
