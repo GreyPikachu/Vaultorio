@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import secrets
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -39,6 +40,39 @@ from src.server.storage import InvalidSaveArchiveError, SaveStorageManager, Stor
 logger = get_logger("api")
 
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Manages background UDP STUN Coordinator lifecycle alongside HTTP server."""
+    stun_transport = None
+    stun_protocol = None
+
+    if getattr(app.state, "enable_stun", False):
+        try:
+            from src.server.stun_coordinator import start_stun_coordinator
+            stun_transport, stun_protocol = await start_stun_coordinator(
+                config=app.state.config,
+                session_manager=app.state.session_manager,
+            )
+            app.state.stun_transport = stun_transport
+            app.state.stun_protocol = stun_protocol
+            logger.info(
+                "UDP STUN Coordinator started on %s:%d",
+                app.state.config.http_host,
+                app.state.config.udp_stun_port,
+            )
+        except Exception as exc:
+            logger.warning("Could not start UDP STUN Coordinator in lifespan: %s", exc)
+
+    yield
+
+    if stun_transport:
+        try:
+            stun_transport.close()
+            logger.info("UDP STUN Coordinator transport closed")
+        except Exception as exc:
+            logger.warning("Error closing UDP STUN transport: %s", exc)
+
+
 def get_client_ip(request: Request) -> str:
     """
     Extracts the client's public IP address, respecting X-Forwarded-For if reverse-proxied.
@@ -63,6 +97,7 @@ def create_app(
     config: Optional[ServerConfig] = None,
     storage: Optional[SaveStorageManager] = None,
     session_manager: Optional[SessionLockManager] = None,
+    enable_stun: bool = False,
 ) -> FastAPI:
     """
     Application factory for the Factorio Safe HTTP API.
@@ -71,6 +106,7 @@ def create_app(
         config: Optional pre-configured ServerConfig.
         storage: Optional SaveStorageManager instance.
         session_manager: Optional SessionLockManager instance.
+        enable_stun: If True, automatically launches UDP STUN Coordinator in lifespan.
 
     Returns:
         FastAPI: Fully configured ASGI application.
@@ -83,12 +119,14 @@ def create_app(
         title="Factorio P2P Safe & Coordinator API",
         version="1.0.0",
         description="Coordinates cloud saves, locks host lease to prevent Split-Brain, and synchronizes mods.",
+        lifespan=lifespan,
     )
 
     # Attach instances to app state for lifecycle access
     app.state.config = app_config
     app.state.storage = app_storage
     app.state.session_manager = app_session
+    app.state.enable_stun = enable_stun
 
     @app.get("/health", response_model=HealthResponse)
     async def health_check() -> Dict[str, Any]:

@@ -31,11 +31,12 @@ def main() -> None:
 
     logger.info("=" * 60)
     logger.info("Starting Factorio Safe HTTP API on %s:%d", config.http_host, config.http_port)
+    logger.info("Starting UDP STUN Coordinator on %s:%d", config.http_host, config.udp_stun_port)
     logger.info("Storage directory: %s", config.storage_dir)
     logger.info("Current save target: %s", config.current_save_path)
     logger.info("=" * 60)
 
-    app = create_app(config=config)
+    app = create_app(config=config, enable_stun=True)
 
     uvicorn.run(
         app,
