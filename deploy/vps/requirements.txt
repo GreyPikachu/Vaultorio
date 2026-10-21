@@ -1,0 +1,7 @@
+# Minimal server requirements for Factorio P2P Safe & Coordinator
+# Designed for low-memory footprint (< 25 MB RAM) on personal VPS alongside Xray/Hysteria VPN
+
+fastapi>=0.100.0,<1.0.0
+uvicorn>=0.23.0,<1.0.0
+python-multipart>=0.0.6
+pydantic>=2.0.0,<3.0.0
