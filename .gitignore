@@ -17,4 +17,5 @@ Thumbs.db
 data/
 *.egg-info/
 dist/
-build/
+build/*
+!build/build_client.py
