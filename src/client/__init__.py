@@ -20,19 +20,33 @@ from src.client.host_workers import (
     flush_final_save_on_exit,
 )
 from src.client.hub_client import HubClient, compute_file_sha256
+from src.client.p2p_tunnel import (
+    GuestP2PProxy,
+    HostP2PBridge,
+    decode_control_packet,
+    encode_control_packet,
+    format_data_packet,
+    parse_data_packet,
+)
 from src.client.ui_notifier import copy_to_clipboard, show_role_banner
 
 __all__ = [
     "AutosaveWatcher",
     "ClientConfig",
     "FactorioEnvironment",
+    "GuestP2PProxy",
     "HeartbeatWorker",
+    "HostP2PBridge",
     "HostWorkersManager",
     "HubClient",
     "LobbyStartDetector",
     "compute_file_sha256",
     "copy_to_clipboard",
+    "decode_control_packet",
+    "encode_control_packet",
     "find_latest_session_save",
     "flush_final_save_on_exit",
+    "format_data_packet",
+    "parse_data_packet",
     "show_role_banner",
 ]
