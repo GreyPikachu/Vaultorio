@@ -63,16 +63,23 @@ class StunCoordinatorProtocol(asyncio.DatagramProtocol):
     hole punching signaling, and fallback UDP relay.
     """
 
-    def __init__(self, config: ServerConfig, session_manager: SessionLockManager) -> None:
+    def __init__(
+        self,
+        config: ServerConfig,
+        session_manager: SessionLockManager,
+        auth_manager: Optional[Any] = None,
+    ) -> None:
         """
         Initializes the STUN coordinator protocol.
 
         Args:
             config: Server configuration settings.
             session_manager: Active SessionLockManager for verifying host tokens.
+            auth_manager: Optional AuthManager for validating device tokens in Stealth Mode.
         """
         self.config = config
         self.session_manager = session_manager
+        self.auth_manager = auth_manager
         self.transport: Optional[asyncio.DatagramTransport] = None
         self.host_peer: Optional[HostPeer] = None
         self.guests: Dict[str, GuestPeer] = {}
@@ -134,6 +141,17 @@ class StunCoordinatorProtocol(asyncio.DatagramProtocol):
             return
 
         cmd = payload.get("cmd")
+
+        # Stealth Mode: validate device_token if auth is enabled
+        if self.auth_manager and self.config.require_device_auth:
+            device_token = payload.get("device_token")
+            if not self.auth_manager.validate_device_token(device_token, client_ip=addr[0]):
+                logger.warning(
+                    "STUN Stealth Mode: Dropped %s packet from %s: invalid or missing device_token",
+                    cmd,
+                    addr,
+                )
+                return
 
         if cmd == "HOST_HELLO":
             self._handle_host_hello(payload, addr)
@@ -355,6 +373,7 @@ class StunCoordinatorProtocol(asyncio.DatagramProtocol):
 async def start_stun_coordinator(
     config: ServerConfig,
     session_manager: SessionLockManager,
+    auth_manager: Optional[Any] = None,
     loop: Optional[asyncio.AbstractEventLoop] = None,
 ) -> Tuple[asyncio.DatagramTransport, StunCoordinatorProtocol]:
     """
@@ -363,6 +382,7 @@ async def start_stun_coordinator(
     Args:
         config: Validated ServerConfig instance.
         session_manager: SessionLockManager instance.
+        auth_manager: Optional AuthManager instance for device token verification.
         loop: Optional running event loop.
 
     Returns:
@@ -371,7 +391,7 @@ async def start_stun_coordinator(
     active_loop = loop or asyncio.get_running_loop()
 
     transport, protocol = await active_loop.create_datagram_endpoint(
-        lambda: StunCoordinatorProtocol(config, session_manager),
+        lambda: StunCoordinatorProtocol(config, session_manager, auth_manager=auth_manager),
         local_addr=(config.http_host, config.udp_stun_port),
     )
 

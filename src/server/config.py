@@ -27,6 +27,7 @@ class ServerConfig:
     http_port: int = 8088
     udp_stun_port: int = 14197
     lease_timeout_seconds: int = 90
+    require_device_auth: bool = False
 
     @property
     def backups_dir(self) -> Path:
@@ -52,6 +53,11 @@ class ServerConfig:
     def metadata_file_path(self) -> Path:
         """Path to metadata file containing hash, version, and upload stats."""
         return self.storage_dir / "save_metadata.json"
+
+    @property
+    def auth_state_path(self) -> Path:
+        """Path to persistent device tokens and invite tickets JSON file."""
+        return self.storage_dir / "auth_state.json"
 
     def validate(self) -> None:
         """
@@ -161,6 +167,9 @@ def load_server_config() -> ServerConfig:
     except ValueError as exc:
         raise ConfigValidationError(f"Invalid FACTORIO_LEASE_TIMEOUT_SECONDS: {exc}") from exc
 
+    require_device_auth_env = os.getenv("FACTORIO_REQUIRE_DEVICE_AUTH", "false").lower()
+    require_device_auth = require_device_auth_env in ("true", "1", "yes")
+
     config = ServerConfig(
         storage_dir=storage_path,
         current_save_filename=os.getenv("FACTORIO_CURRENT_SAVE_FILENAME", "cloud_world.zip"),
@@ -171,6 +180,7 @@ def load_server_config() -> ServerConfig:
         http_port=http_port,
         udp_stun_port=udp_stun_port,
         lease_timeout_seconds=lease_timeout,
+        require_device_auth=require_device_auth,
     )
 
     config.validate()

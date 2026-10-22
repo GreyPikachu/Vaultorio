@@ -14,9 +14,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from fastapi import FastAPI, File, Form, Header, HTTPException, Request, Response, UploadFile
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, Response, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 
+from src.server.auth_manager import (
+    AuthError,
+    AuthManager,
+    InvalidInviteTicketError,
+    InviteTicketAlreadyUsedError,
+    InviteTicketExpiredError,
+    RateLimitExceededError,
+)
 from src.server.config import ServerConfig, load_server_config
 from src.server.logger import get_logger
 from src.server.schemas import (
@@ -30,6 +38,8 @@ from src.server.schemas import (
     HeartbeatRequest,
     ModManifestRequest,
     PublicStatusResponse,
+    RedeemInviteRequest,
+    RedeemInviteResponse,
     ReleaseHostRequest,
     StandardActionResponse,
     UploadSaveResponse,
@@ -52,6 +62,7 @@ async def lifespan(app: FastAPI):
             stun_transport, stun_protocol = await start_stun_coordinator(
                 config=app.state.config,
                 session_manager=app.state.session_manager,
+                auth_manager=getattr(app.state, "auth_manager", None),
             )
             app.state.stun_transport = stun_transport
             app.state.stun_protocol = stun_protocol
@@ -97,6 +108,7 @@ def create_app(
     config: Optional[ServerConfig] = None,
     storage: Optional[SaveStorageManager] = None,
     session_manager: Optional[SessionLockManager] = None,
+    auth_manager: Optional[AuthManager] = None,
     enable_stun: bool = False,
 ) -> FastAPI:
     """
@@ -106,6 +118,7 @@ def create_app(
         config: Optional pre-configured ServerConfig.
         storage: Optional SaveStorageManager instance.
         session_manager: Optional SessionLockManager instance.
+        auth_manager: Optional AuthManager instance for device token verification.
         enable_stun: If True, automatically launches UDP STUN Coordinator in lifespan.
 
     Returns:
@@ -114,6 +127,7 @@ def create_app(
     app_config = config or load_server_config()
     app_storage = storage or SaveStorageManager(app_config)
     app_session = session_manager or SessionLockManager(app_config)
+    app_auth = auth_manager or AuthManager(app_config)
 
     app = FastAPI(
         title="Factorio P2P Safe & Coordinator API",
@@ -126,7 +140,25 @@ def create_app(
     app.state.config = app_config
     app.state.storage = app_storage
     app.state.session_manager = app_session
+    app.state.auth_manager = app_auth
     app.state.enable_stun = enable_stun
+
+    async def verify_device_token(
+        request: Request,
+        x_device_token: Optional[str] = Header(None, alias="X-Device-Token"),
+    ) -> None:
+        """Verifies client device token against AuthManager trusted devices table."""
+        client_ip = get_client_ip(request)
+        if not app_auth.validate_device_token(x_device_token, client_ip=client_ip):
+            logger.warning(
+                "Access denied (403 Forbidden): invalid or missing X-Device-Token from %s for %s",
+                client_ip,
+                request.url.path,
+            )
+            raise HTTPException(
+                status_code=403,
+                detail="Forbidden: valid X-Device-Token is required to access Factorio Hub",
+            )
 
     @app.get("/health", response_model=HealthResponse)
     async def health_check() -> Dict[str, Any]:
@@ -137,7 +169,33 @@ def create_app(
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
 
-    @app.get("/status")
+    @app.post("/auth/redeem-invite", response_model=RedeemInviteResponse)
+    async def redeem_invite(req: RedeemInviteRequest, request: Request) -> RedeemInviteResponse:
+        """
+        Public onboarding endpoint: redeems a one-time invite ticket and issues a permanent device_token.
+        Rate limited per client IP to prevent brute-force attacks.
+        """
+        client_ip = get_client_ip(request)
+        try:
+            result = app_auth.redeem_invite(
+                ticket=req.ticket,
+                player_name=req.player_name,
+                client_ip=client_ip,
+            )
+            return RedeemInviteResponse(**result)
+        except RateLimitExceededError as rle:
+            logger.warning("Redeem invite rate limit hit for IP %s: %s", client_ip, rle)
+            raise HTTPException(status_code=429, detail=str(rle))
+        except (InvalidInviteTicketError, InviteTicketExpiredError, InviteTicketAlreadyUsedError) as auth_err:
+            logger.warning("Redeem invite rejected for IP %s: %s", client_ip, auth_err)
+            raise HTTPException(status_code=403, detail=str(auth_err))
+        except ValueError as val_err:
+            raise HTTPException(status_code=422, detail=str(val_err))
+        except Exception as exc:
+            logger.error("Unexpected error during redeem_invite: %s", exc, exc_info=True)
+            raise HTTPException(status_code=500, detail="Internal server error")
+
+    @app.get("/status", dependencies=[Depends(verify_device_token)])
     async def get_status() -> Dict[str, Any]:
         """
         Returns full public status combining session lock information,
@@ -170,7 +228,7 @@ def create_app(
                 content={"error": "status_error", "message": str(exc)},
             )
 
-    @app.post("/claim")
+    @app.post("/claim", dependencies=[Depends(verify_device_token)])
     async def claim_host(req: ClaimHostRequest, request: Request) -> JSONResponse:
         """
         Attempts to claim host lease for a player launching Factorio.
@@ -198,7 +256,7 @@ def create_app(
             logger.error("Error during claim_host for '%s': %s", req.player_name, exc, exc_info=True)
             return JSONResponse(status_code=500, content={"error": "claim_failed", "message": str(exc)})
 
-    @app.post("/confirm-hosting")
+    @app.post("/confirm-hosting", dependencies=[Depends(verify_device_token)])
     async def confirm_hosting(req: ConfirmHostingRequest) -> JSONResponse:
         """
         Transitions host from 'claiming' to 'hosting_active' once the lobby is listening.
@@ -222,7 +280,7 @@ def create_app(
             logger.error("Error during confirm_hosting: %s", exc, exc_info=True)
             return JSONResponse(status_code=500, content={"error": "confirm_failed", "message": str(exc)})
 
-    @app.post("/heartbeat")
+    @app.post("/heartbeat", dependencies=[Depends(verify_device_token)])
     async def heartbeat(req: HeartbeatRequest) -> JSONResponse:
         """
         Renews the host lease timestamp to prevent network disconnect expiration.
@@ -246,7 +304,7 @@ def create_app(
             logger.error("Error during heartbeat: %s", exc, exc_info=True)
             return JSONResponse(status_code=500, content={"error": "heartbeat_failed", "message": str(exc)})
 
-    @app.post("/begin-final-upload")
+    @app.post("/begin-final-upload", dependencies=[Depends(verify_device_token)])
     async def begin_final_upload(req: BeginFinalUploadRequest) -> JSONResponse:
         """
         Signals server that host is closing the game and starting final world save upload.
@@ -265,7 +323,7 @@ def create_app(
             logger.error("Error during begin_final_upload: %s", exc, exc_info=True)
             return JSONResponse(status_code=500, content={"error": "upload_start_failed", "message": str(exc)})
 
-    @app.post("/release")
+    @app.post("/release", dependencies=[Depends(verify_device_token)])
     async def release_host(req: ReleaseHostRequest) -> JSONResponse:
         """
         Releases host lease and resets session state to 'idle'.
@@ -283,7 +341,7 @@ def create_app(
             logger.error("Error during release_host: %s", exc, exc_info=True)
             return JSONResponse(status_code=500, content={"error": "release_failed", "message": str(exc)})
 
-    @app.post("/guests/register")
+    @app.post("/guests/register", dependencies=[Depends(verify_device_token)])
     async def register_guest(req: GuestRegisterRequest, request: Request) -> JSONResponse:
         """
         Registers a guest player currently connected to the host.
@@ -300,7 +358,7 @@ def create_app(
             logger.error("Error during register_guest: %s", exc, exc_info=True)
             return JSONResponse(status_code=500, content={"error": "guest_register_failed", "message": str(exc)})
 
-    @app.post("/guests/deregister")
+    @app.post("/guests/deregister", dependencies=[Depends(verify_device_token)])
     async def deregister_guest(req: GuestDeregisterRequest) -> JSONResponse:
         """
         Deregisters a disconnected guest.
@@ -312,7 +370,7 @@ def create_app(
             logger.error("Error during deregister_guest: %s", exc, exc_info=True)
             return JSONResponse(status_code=500, content={"error": "guest_deregister_failed", "message": str(exc)})
 
-    @app.get("/download-save")
+    @app.get("/download-save", dependencies=[Depends(verify_device_token)])
     async def download_save(
         request: Request,
         client_sha256: Optional[str] = None,
@@ -352,7 +410,7 @@ def create_app(
             },
         )
 
-    @app.post("/upload-save")
+    @app.post("/upload-save", dependencies=[Depends(verify_device_token)])
     async def upload_save(
         file: UploadFile = File(...),
         session_token: Optional[str] = Form(None),
@@ -476,7 +534,7 @@ def create_app(
             },
         )
 
-    @app.get("/mod-manifest")
+    @app.get("/mod-manifest", dependencies=[Depends(verify_device_token)])
     async def get_mod_manifest() -> Dict[str, Any]:
         """
         Retrieves the active mod manifest (mod-list.json).
@@ -484,7 +542,7 @@ def create_app(
         manifest = app_storage.get_mod_manifest()
         return manifest
 
-    @app.post("/mod-manifest")
+    @app.post("/mod-manifest", dependencies=[Depends(verify_device_token)])
     async def post_mod_manifest(req: ModManifestRequest) -> JSONResponse:
         """
         Explicitly stores or updates mod-list.json manifest.

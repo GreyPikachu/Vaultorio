@@ -106,3 +106,20 @@ class UploadSaveResponse(BaseModel):
     success: bool
     save: Dict[str, Any]
     status: Dict[str, Any]
+
+
+class RedeemInviteRequest(BaseModel):
+    """Payload to redeem an invite ticket and acquire a permanent device token."""
+
+    ticket: str
+    player_name: str
+
+
+class RedeemInviteResponse(BaseModel):
+    """Response returned upon successful invite redemption."""
+
+    success: bool
+    device_token: str
+    device_id: str
+    player_name: str
+
