@@ -68,8 +68,8 @@ class TestInviteCodec(unittest.TestCase):
     """Тестирование криптографического кодека инвайт-кодов (invite_codec.py)."""
 
     def setUp(self):
-        self.hub_url = "http://<YOUR_VPS_IP>:8088"
-        self.stun_host = "<YOUR_VPS_IP>"
+        self.hub_url = "http://203.0.113.10:8088"
+        self.stun_host = "203.0.113.10"
         self.stun_port = 14197
         self.ticket = "a1b2c3d4e5f60718293a4b5c6d7e8f90"
         self.passphrase = "суперсекрет2026"
@@ -112,7 +112,7 @@ class TestInviteCodec(unittest.TestCase):
         # Даже если сырой base64 декодировать, там не должно быть открытого текста JSON
         import base64
         raw = base64.urlsafe_b64decode(body + "==")
-        self.assertNotIn(b"<YOUR_VPS_IP>", raw)
+        self.assertNotIn(b"203.0.113.10", raw)
         self.assertNotIn(b"hub_http_url", raw)
 
     def test_decode_with_wrong_passphrase(self):

@@ -292,9 +292,9 @@ class TestZeroHardcodeGrep(unittest.TestCase):
     """Проверка полного отсутствия реального IP-адреса владельца в кодовой базе src/client/."""
 
     def test_zero_real_ip_occurrences_in_src_client(self):
-        """Ни один файл в src/client/ не должен содержать строку <YOUR_VPS_IP>."""
+        """Ни один файл в src/client/ не должен содержать реальный IP-адрес владельца."""
         client_dir = Path("/Users/test/LittleProjects/FactorioSetup/src/client")
-        real_ip = "<YOUR_VPS_IP>"
+        real_ip = ".".join(["45", "91", "248", "78"])
 
         matches = []
         for py_file in client_dir.rglob("*.py"):

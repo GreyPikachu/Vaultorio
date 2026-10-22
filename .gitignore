@@ -17,5 +17,17 @@ Thumbs.db
 data/
 *.egg-info/
 dist/
+build_temp/
 build/*
 !build/build_client.py
+
+# Private configs, state & secrets
+factorio_sync_config.json
+auth_state.json
+*.log
+.cloud_stash/
+
+# Sensitive local notes
+FacotryArchitecture.txt
+SETUP FACTORIO.txt
+Проблема1.txt
