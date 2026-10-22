@@ -30,8 +30,8 @@ class TestClientConfig(unittest.TestCase):
     def test_default_config(self) -> None:
         """Проверка значений конфигурации по умолчанию."""
         cfg = ClientConfig()
-        self.assertEqual(cfg.hub_http_url, "http://<YOUR_VPS_IP>:8088")
-        self.assertEqual(cfg.hub_stun_host, "<YOUR_VPS_IP>")
+        self.assertEqual(cfg.hub_http_url, "http://127.0.0.1:8088")
+        self.assertEqual(cfg.hub_stun_host, "127.0.0.1")
         self.assertEqual(cfg.hub_stun_port, 14197)
         self.assertEqual(cfg.cloud_save_name, "cloud_world.zip")
         self.assertEqual(cfg.host_factorio_port, 34197)
@@ -40,7 +40,7 @@ class TestClientConfig(unittest.TestCase):
     def test_invalid_http_url(self) -> None:
         """URL должен начинаться с http:// или https://."""
         with self.assertRaises(ValueError):
-            ClientConfig(hub_http_url="ftp://<YOUR_VPS_IP>:8088")
+            ClientConfig(hub_http_url="ftp://127.0.0.1:8088")
 
     def test_hysteria_port_barrier_rejection(self) -> None:
         """Защитный барьер: STUN порт не должен попадать в 20000:50000."""

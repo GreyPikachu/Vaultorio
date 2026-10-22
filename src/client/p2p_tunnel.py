@@ -131,11 +131,12 @@ class HostP2PBridge:
     def __init__(
         self,
         session_token: str,
-        stun_host: str = "<YOUR_VPS_IP>",
+        stun_host: str = "127.0.0.1",
         stun_port: int = 14197,
         factorio_port: int = 34197,
         local_ip: str | None = None,
         poll_interval: float = 0.05,
+        device_token: str = "",
     ) -> None:
         if not session_token:
             raise ValueError("session_token не может быть пустым")
@@ -146,6 +147,7 @@ class HostP2PBridge:
         self.factorio_port = int(factorio_port)
         self.local_ip = local_ip
         self.poll_interval = max(0.005, float(poll_interval))
+        self.device_token = device_token or ""
 
         self._s_host: socket.socket | None = None
         self._guests: Dict[str, ConnectedGuestState] = {}
@@ -240,6 +242,7 @@ class HostP2PBridge:
             "session_token": self.session_token,
             "local_ip": self.local_ip,
             "local_port": self.factorio_port,
+            "device_token": self.device_token,
         }
         try:
             packet = encode_control_packet(payload)
@@ -522,12 +525,13 @@ class GuestP2PProxy:
         self,
         guest_name: str,
         guest_id: str | None = None,
-        stun_host: str = "<YOUR_VPS_IP>",
+        stun_host: str = "127.0.0.1",
         stun_port: int = 14197,
         proxy_port: int = 34198,
         local_ip: str | None = None,
         punch_timeout_sec: float = 5.0,
         poll_interval: float = 0.05,
+        device_token: str = "",
     ) -> None:
         self.guest_name = str(guest_name).strip() or "Guest"
         self.guest_id = str(guest_id).strip()[:8] if guest_id else secrets.token_hex(4)
@@ -537,6 +541,7 @@ class GuestP2PProxy:
         self.local_ip = local_ip
         self.punch_timeout_sec = max(0.05, float(punch_timeout_sec))
         self.poll_interval = max(0.005, float(poll_interval))
+        self.device_token = device_token or ""
 
         self._l_proxy: socket.socket | None = None
         self._s_guest: socket.socket | None = None
@@ -650,6 +655,7 @@ class GuestP2PProxy:
             "guest_name": self.guest_name,
             "local_ip": self.local_ip,
             "local_port": self.proxy_port,
+            "device_token": self.device_token,
         }
         try:
             packet = encode_control_packet(payload)

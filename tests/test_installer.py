@@ -145,7 +145,7 @@ def test_t11_2_2_fresh_install_windows(win_game_dir: Path, dummy_wrapper_bin: Pa
     assert cfg_path.is_file()
     cfg_data = json.loads(cfg_path.read_text(encoding="utf-8"))
     assert cfg_data["player_name"] == "AlexCoop"
-    assert cfg_data["hub_http_url"] == "http://<YOUR_VPS_IP>:8088"
+    assert cfg_data["hub_http_url"] == "http://127.0.0.1:8088"
     assert cfg_data["hub_stun_port"] == 14197
 
 

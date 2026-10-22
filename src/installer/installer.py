@@ -40,8 +40,8 @@ class FactorioWrapperInstaller:
 
     def __init__(
         self,
-        default_hub_url: str = "http://<YOUR_VPS_IP>:8088",
-        default_stun_host: str = "<YOUR_VPS_IP>",
+        default_hub_url: str = "http://127.0.0.1:8088",
+        default_stun_host: str = "127.0.0.1",
         default_stun_port: int = 14197,
     ) -> None:
         self.default_hub_url = default_hub_url
@@ -493,7 +493,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     args = parser.parse_args(argv)
     installer = FactorioWrapperInstaller(
-        default_hub_url=args.hub_url or "http://<YOUR_VPS_IP>:8088",
+        default_hub_url=args.hub_url or "http://127.0.0.1:8088",
     )
 
     # Если параметры не переданы — запуск интерактивного меню

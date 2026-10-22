@@ -52,6 +52,7 @@ class HubClient:
         config: Optional[ClientConfig] = None,
         http_client: Optional[httpx.Client] = None,
         timeout: Optional[float] = None,
+        device_token: Optional[str] = None,
     ) -> None:
         """Инициализирует клиент.
 
@@ -59,9 +60,11 @@ class HubClient:
             config: Конфигурация клиента (если не передана, берется из окружения).
             http_client: Экземпляр httpx.Client (полезно для тестов с ASGITransport).
             timeout: Таймаут запросов в секундах.
+            device_token: Персональный токен устройства (если не передан, берется из config).
         """
         self.config = config or ClientConfig.from_env()
         self.timeout = timeout or self.config.request_timeout_seconds
+        self.device_token: str = device_token if device_token is not None else self.config.device_token
 
         if http_client is not None:
             self._client = http_client
@@ -72,6 +75,9 @@ class HubClient:
                 timeout=self.timeout,
             )
             self._owns_client = True
+
+        if self.device_token:
+            self._client.headers["X-Device-Token"] = self.device_token
 
     def close(self) -> None:
         """Закрывает HTTP-сессию."""
@@ -624,3 +630,108 @@ class HubClient:
         except Exception as e:
             logger.warning(f"Ошибка при дерегистрации гостя '{player_name}': {e}")
             return False
+
+    # =========================================================================
+    # Раздел 6: Активация инвайт-кодов и авторизация устройств
+    # =========================================================================
+
+    def redeem_invite(self, ticket: str, player_name: str) -> dict[str, Any]:
+        """Активирует одноразовый билет на сервере и сохраняет полученный device_token.
+
+        Args:
+            ticket: Билет приглашения.
+            player_name: Никнейм игрока.
+
+        Returns:
+            Словарь с результатом активации (device_token, device_id, player_name).
+        """
+        clean_ticket = (ticket or "").strip()
+        clean_player = (player_name or "").strip()
+
+        if not clean_ticket:
+            raise ValueError("Билет приглашения (ticket) не может быть пустым.")
+        if not clean_player:
+            raise ValueError("Имя игрока (player_name) не может быть пустым.")
+
+        payload = {
+            "ticket": clean_ticket,
+            "player_name": clean_player,
+        }
+
+        try:
+            resp = self._client.post("/auth/redeem-invite", json=payload)
+            resp.raise_for_status()
+            data = resp.json()
+
+            token = data.get("device_token")
+            if token:
+                self.device_token = token
+                self._client.headers["X-Device-Token"] = token
+                self.config.device_token = token
+                if data.get("device_id"):
+                    self.config.device_id = data["device_id"]
+                logger.info(f"Успешно активирован билет! Получен device_token для '{clean_player}'")
+
+            return data
+        except Exception as e:
+            logger.error(f"Ошибка при активации билета приглашения на сервере: {e}")
+            raise
+
+    @classmethod
+    def activate_with_invite_code(
+        cls,
+        invite_code: str,
+        passphrase: str,
+        player_name: str,
+        config_path: Optional[Path | str] = None,
+        http_client: Optional[httpx.Client] = None,
+    ) -> ClientConfig:
+        """Расшифровывает код приглашения FCT1-..., активирует билет на сервере и возвращает ClientConfig.
+
+        Args:
+            invite_code: Зашифрованный код 'FCT1-...'.
+            passphrase: Кодовая фраза для дешифрования.
+            player_name: Имя игрока.
+            config_path: Опциональный путь для сохранения файла конфигурации.
+            http_client: Опциональный клиент httpx (для тестов).
+
+        Returns:
+            Сконфигурированный экземпляр ClientConfig с выданным токеном устройства.
+        """
+        from src.common.invite_codec import decode_invite_code
+
+        # 1. Локальная расшифровка инвайт-кода
+        decoded = decode_invite_code(invite_code, passphrase)
+        hub_http_url = str(decoded["hub_http_url"])
+        hub_stun_host = str(decoded["hub_stun_host"])
+        hub_stun_port = int(decoded["hub_stun_port"])
+        ticket = str(decoded["ticket"])
+
+        # 2. Временный клиент для активации билета
+        temp_config = ClientConfig(
+            hub_http_url=hub_http_url,
+            hub_stun_host=hub_stun_host,
+            hub_stun_port=hub_stun_port,
+            player_name=player_name,
+        )
+
+        with cls(config=temp_config, http_client=http_client) as client:
+            res = client.redeem_invite(ticket=ticket, player_name=player_name)
+
+        device_token = res["device_token"]
+        device_id = res.get("device_id", "")
+
+        # 3. Формирование готового конфига
+        final_config = ClientConfig(
+            hub_http_url=hub_http_url,
+            hub_stun_host=hub_stun_host,
+            hub_stun_port=hub_stun_port,
+            player_name=player_name,
+            device_token=device_token,
+            device_id=device_id,
+        )
+
+        if config_path:
+            final_config.save_to_file(config_path)
+
+        return final_config

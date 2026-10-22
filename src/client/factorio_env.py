@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import getpass
 import json
 import logging
 import os
@@ -315,6 +316,54 @@ class FactorioEnvironment:
         except Exception as e:
             logger.error(f"Не удалось установить никнейм '{username}': {e}")
             raise
+
+    def resolve_or_init_player_username(self, fallback_name: str | None = None) -> str:
+        """Определяет актуальный никнейм игрока либо инициализирует его.
+
+        Алгоритм:
+        1. Читает никнейм из player-data.json / config.ini.
+        2. Если имя задано, не пустое, не равно дефолтному 'Player' и длина >= 2 символов — возвращает его.
+        3. Если имя отсутствует или равно 'Player':
+           - Использует fallback_name (если он валиден и != 'Player').
+           - Иначе вычисляет имя учетной записи ОС (getpass.getuser() / Path.home().name),
+             очищает от спецсимволов. Если результат пустой или равен 'Player' — использует 'Engineer'.
+        4. Автоматически сохраняет вычисленное имя в player-data.json, чтобы игра и сервер
+           использовали единый валидный никнейм.
+
+        Args:
+            fallback_name: Опциональный резервный никнейм.
+
+        Returns:
+            Валидный никнейм игрока.
+        """
+        current_name = self.get_player_username()
+        if current_name and current_name.strip() and current_name.strip().lower() != "player" and len(current_name.strip()) >= 2:
+            return current_name.strip()
+
+        # Проверяем fallback_name
+        chosen_name: str | None = None
+        if fallback_name and fallback_name.strip() and fallback_name.strip().lower() != "player" and len(fallback_name.strip()) >= 2:
+            chosen_name = fallback_name.strip()
+
+        # Если fallback не подошел, берем имя пользователя ОС
+        if not chosen_name:
+            try:
+                os_user = getpass.getuser()
+            except Exception:
+                os_user = Path.home().name
+
+            clean_os_user = re.sub(r"[^a-zA-Z0-9_\-]", "", os_user or "").strip()
+            if clean_os_user and clean_os_user.lower() != "player" and len(clean_os_user) >= 2:
+                chosen_name = clean_os_user
+            else:
+                chosen_name = "Engineer"
+
+        try:
+            self.set_player_username(chosen_name)
+        except Exception as err:
+            logger.warning(f"Не удалось автоматически записать никнейм '{chosen_name}' в player-data.json: {err}")
+
+        return chosen_name
 
     # =========================================================================
     # Раздел 4: Конфигурация мультиплеера и автосохранений

@@ -291,11 +291,9 @@ class SessionOrchestrator:
             if restored:
                 logger.info(f"Восстановлено сохранение после прошлого сеанса Гостя: {restored}")
 
-            # Шаг 2: Никнейм игрока
-            username = self.env.get_player_username()
-            if not username or not username.strip():
-                username = self.config.player_name or os.getenv("FACTORIO_PLAYER_NAME") or "Player"
-            self.player_name = username.strip()
+            # Шаг 2: Никнейм игрока (главный источник истины — player-data.json)
+            fallback = self.config.player_name or os.getenv("FACTORIO_PLAYER_NAME")
+            self.player_name = self.env.resolve_or_init_player_username(fallback_name=fallback)
             logger.info(f"Инициализация сессии для игрока: '{self.player_name}'")
 
             # Шаг 3: Проверка статуса сервера
@@ -372,6 +370,7 @@ class SessionOrchestrator:
                         stun_host=self.config.hub_stun_host,
                         stun_port=self.config.hub_stun_port,
                         factorio_port=self.config.host_factorio_port,
+                        device_token=self.config.device_token,
                     )
                     self.host_bridge.start()
 
@@ -425,6 +424,7 @@ class SessionOrchestrator:
                 stun_host=self.config.hub_stun_host,
                 stun_port=self.config.hub_stun_port,
                 proxy_port=self.config.guest_proxy_port,
+                device_token=self.config.device_token,
             )
             self.guest_proxy.start()
 
