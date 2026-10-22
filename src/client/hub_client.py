@@ -426,6 +426,56 @@ class HubClient:
             logger.error(f"Ошибка при скачивании сейва с сервера: {e}")
             raise
 
+    def download_save(
+        self,
+        target_path: Path | str,
+        expected_sha: Optional[str] = None,
+        chunk_size: int = 65536,
+    ) -> Path:
+        """Скачивает файл сохранения с сервера-сейфа по указанному пути.
+
+        Скачивание производится через временный файл .part с валидацией ZIP-архива
+        и SHA-256 (если передан expected_sha), после чего файл атомарно перемещается.
+
+        Args:
+            target_path: Путь для сохранения скачанного файла.
+            expected_sha: Ожидаемый SHA-256 хеш (если известен).
+            chunk_size: Размер блока потокового чтения.
+
+        Returns:
+            Итоговый путь к скачанному файлу.
+        """
+        dest = Path(target_path).resolve()
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        part_path = dest.with_suffix(dest.suffix + ".part")
+
+        try:
+            with self._client.stream("GET", "/download-save") as resp:
+                resp.raise_for_status()
+                with part_path.open("wb") as out_f:
+                    for chunk in resp.iter_bytes(chunk_size=chunk_size):
+                        out_f.write(chunk)
+
+            if expected_sha:
+                downloaded_sha = compute_file_sha256(part_path)
+                if downloaded_sha.lower() != expected_sha.lower():
+                    part_path.unlink(missing_ok=True)
+                    raise ValueError(
+                        f"Хеш скачанного файла ({downloaded_sha}) не совпадает с ожидаемым ({expected_sha})!"
+                    )
+
+            if not zipfile.is_zipfile(part_path):
+                part_path.unlink(missing_ok=True)
+                raise ValueError("Скачанный файл не является валидным ZIP-архивом Factorio.")
+
+            os.replace(part_path, dest)
+            logger.info(f"Сейф успешно скачан: {dest.name}")
+            return dest
+        except Exception as e:
+            part_path.unlink(missing_ok=True)
+            logger.error(f"Ошибка при скачивании сейва в {dest}: {e}")
+            raise
+
     # =========================================================================
     # Раздел 4: Выгрузка сохранения в облако (upload_save)
     # =========================================================================

@@ -11,6 +11,7 @@
 
 from src.client.config import ClientConfig
 from src.client.factorio_env import FactorioEnvironment
+from src.client.factorio_wrapper import main, setup_client_logging
 from src.client.host_workers import (
     AutosaveWatcher,
     HeartbeatWorker,
@@ -28,18 +29,26 @@ from src.client.p2p_tunnel import (
     format_data_packet,
     parse_data_packet,
 )
+from src.client.session_orchestrator import (
+    GuestHandoverWatcher,
+    RoleType,
+    SessionOrchestrator,
+)
 from src.client.ui_notifier import copy_to_clipboard, show_role_banner
 
 __all__ = [
     "AutosaveWatcher",
     "ClientConfig",
     "FactorioEnvironment",
+    "GuestHandoverWatcher",
     "GuestP2PProxy",
     "HeartbeatWorker",
     "HostP2PBridge",
     "HostWorkersManager",
     "HubClient",
     "LobbyStartDetector",
+    "RoleType",
+    "SessionOrchestrator",
     "compute_file_sha256",
     "copy_to_clipboard",
     "decode_control_packet",
@@ -47,6 +56,8 @@ __all__ = [
     "find_latest_session_save",
     "flush_final_save_on_exit",
     "format_data_packet",
+    "main",
     "parse_data_packet",
+    "setup_client_logging",
     "show_role_banner",
 ]
