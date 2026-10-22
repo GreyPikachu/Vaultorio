@@ -130,6 +130,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     logger.info("Запуск Factorio P2P Wrapper («Сейф + Перехватчик»)")
     logger.info("=" * 60)
 
+    # Проверка наличия сохраненного файла конфигурации factorio_sync_config.json
+    config_path = env.sync_config_path
+    loaded_config = ClientConfig.load_from_file(config_path)
+
     # Загрузка конфигурации клиента с переопределениями
     config_overrides = {}
     if wrapper_args.wrapper_hub_url:
@@ -138,7 +142,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         config_overrides["player_name"] = wrapper_args.wrapper_player_name
 
     try:
-        config = ClientConfig.from_env(**config_overrides)
+        if loaded_config is not None:
+            config = loaded_config
+            for k, v in config_overrides.items():
+                if v is not None:
+                    setattr(config, k, v)
+        else:
+            config = ClientConfig.from_env(**config_overrides)
     except Exception as conf_err:
         logger.error(f"Фатальная ошибка конфигурации клиента: {conf_err}")
         return 1
@@ -147,6 +157,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         config=config,
         env=env,
         custom_core_bin=wrapper_args.wrapper_core_bin,
+        config_path=config_path,
     )
 
     try:

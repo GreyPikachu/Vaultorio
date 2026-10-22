@@ -128,7 +128,10 @@ class ClientConfig:
             if not isinstance(data, dict):
                 logger.warning(f"Файл {src_path} не содержит JSON-объект.")
                 return None
-            return cls(**data)
+            import dataclasses
+            valid_fields = {f.name for f in dataclasses.fields(cls)}
+            filtered_data = {k: v for k, v in data.items() if k in valid_fields}
+            return cls(**filtered_data)
         except Exception as e:
             logger.warning(f"Не удалось загрузить конфигурацию из {src_path}: {e}")
             return None

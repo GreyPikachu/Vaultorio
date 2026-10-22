@@ -146,7 +146,7 @@ class GuestHandoverWatcher:
 
                     host_label = self.initial_host or "Хост"
                     show_role_banner(
-                        f"👑 Хост {host_label} вышел! Свежий мир скачан — теперь вы можете запустить cloud_world как новый Хост",
+                        f"Хост {host_label} вышел! Свежий мир скачан — теперь вы можете запустить cloud_world как новый Хост",
                         duration_sec=10.0,
                     )
 
@@ -171,9 +171,22 @@ class SessionOrchestrator:
         env: Optional[FactorioEnvironment] = None,
         hub_client: Optional[HubClient] = None,
         custom_core_bin: Optional[Path | str] = None,
+        config_path: Optional[Path | str] = None,
+        setup_gui_provider: Optional[Callable[..., Optional[ClientConfig]]] = None,
     ) -> None:
-        self.config = config or ClientConfig.from_env()
         self.env = env or FactorioEnvironment()
+        self.config_path = Path(config_path).resolve() if config_path else self.env.sync_config_path
+        self.setup_gui_provider = setup_gui_provider
+
+        if config is not None:
+            self.config = config
+        else:
+            loaded = ClientConfig.load_from_file(self.config_path)
+            if loaded is not None:
+                self.config = loaded
+            else:
+                self.config = ClientConfig.from_env()
+
         self.custom_core_bin = Path(custom_core_bin).resolve() if custom_core_bin else None
 
         if hub_client is not None:
@@ -285,6 +298,55 @@ class SessionOrchestrator:
              копирует 127.0.0.1:34198 в буфер обмена и запускает GuestP2PProxy + GuestHandoverWatcher.
         """
         with self._lock:
+            # Шаг 0: Первичная настройка через GUI, если конфигурация не завершена
+            if not self.config.is_configured():
+                logger.info("Клиент еще не настроен (отсутствует device_token). Запуск GUI первого запуска...")
+                gui_runner = self.setup_gui_provider
+                if gui_runner is None:
+                    try:
+                        from src.client.setup_gui import run_first_time_setup_gui
+                        gui_runner = run_first_time_setup_gui
+                    except ImportError:
+                        gui_runner = None
+
+                if gui_runner is not None:
+                    try:
+                        new_config = gui_runner(
+                            env=self.env,
+                            config_path=self.config_path,
+                            installer_mode=False,
+                            http_client=getattr(self.hub_client, "_client", None),
+                        )
+                        if new_config and new_config.is_configured():
+                            self.config = new_config
+                            if self._owns_hub_client:
+                                try:
+                                    self.hub_client.close()
+                                except Exception:
+                                    pass
+                                self.hub_client = HubClient(config=self.config)
+                            logger.info("Первичная настройка через GUI успешно завершена.")
+                        else:
+                            logger.warning(
+                                "Первичная настройка через GUI отменена пользователем. "
+                                "Переход в автономный режим (OFFLINE)."
+                            )
+                            self.role = RoleType.OFFLINE
+                            self.is_prepared = True
+                            return {
+                                "role": self.role,
+                                "reason": "setup_cancelled_by_user",
+                            }
+                    except Exception as gui_err:
+                        logger.warning(f"Ошибка при вызове GUI первого запуска: {gui_err}")
+                        self.role = RoleType.OFFLINE
+                        self.is_prepared = True
+                        return {
+                            "role": self.role,
+                            "reason": "setup_gui_failed",
+                            "error": str(gui_err),
+                        }
+
             # Шаг 1: Обеспечение директорий и восстановление от возможных прошлых сбоев
             self.env.ensure_dirs()
             restored = self.env.restore_hidden_cloud_save()
@@ -300,20 +362,78 @@ class SessionOrchestrator:
             try:
                 status = self.hub_client.get_status()
             except Exception as err:
-                logger.warning(
-                    f"Сервер-сейф недоступен ({err}). Переход в автономный режим (OFFLINE)."
-                )
-                show_role_banner(
-                    "⚠️ Сервер-сейф недоступен. Игра запущена в автономном режиме.",
-                    duration_sec=7.0,
-                )
-                self.role = RoleType.OFFLINE
-                self.is_prepared = True
-                return {
-                    "role": self.role,
-                    "reason": "server_unreachable",
-                    "error": str(err),
-                }
+                # Проверка на 403 Forbidden (токен устройства отозван администратором)
+                is_forbidden = False
+                if hasattr(err, "response") and getattr(err.response, "status_code", None) == 403:
+                    is_forbidden = True
+                elif "403" in str(err) or "Forbidden" in str(err):
+                    is_forbidden = True
+
+                if is_forbidden:
+                    logger.warning(
+                        "Токен устройства отозван или недействителен (403 Forbidden). "
+                        "Сброс токена и повторная авторизация..."
+                    )
+                    self.config.device_token = ""
+                    try:
+                        self.config.save_to_file(self.config_path)
+                    except Exception as save_err:
+                        logger.warning(f"Не удалось обновить файл конфигурации при сбросе токена: {save_err}")
+
+                    gui_runner = self.setup_gui_provider
+                    if gui_runner is None:
+                        try:
+                            from src.client.setup_gui import run_first_time_setup_gui
+                            gui_runner = run_first_time_setup_gui
+                        except ImportError:
+                            gui_runner = None
+
+                    if gui_runner is not None:
+                        try:
+                            new_config = gui_runner(
+                                env=self.env,
+                                config_path=self.config_path,
+                                installer_mode=False,
+                                http_client=getattr(self.hub_client, "_client", None),
+                                prompt_message="Доступ устройства был обновлен администратором. Пожалуйста, введите новый Код Дружбы.",
+                            )
+                            if new_config and new_config.is_configured():
+                                self.config = new_config
+                                if self._owns_hub_client:
+                                    try:
+                                        self.hub_client.close()
+                                    except Exception:
+                                        pass
+                                    self.hub_client = HubClient(config=self.config)
+                                status = self.hub_client.get_status()
+                            else:
+                                self.role = RoleType.OFFLINE
+                                self.is_prepared = True
+                                return {"role": self.role, "reason": "reauth_cancelled"}
+                        except Exception as reauth_err:
+                            logger.warning(f"Ошибка повторной авторизации через GUI: {reauth_err}")
+                            self.role = RoleType.OFFLINE
+                            self.is_prepared = True
+                            return {"role": self.role, "reason": "reauth_failed", "error": str(reauth_err)}
+                    else:
+                        self.role = RoleType.OFFLINE
+                        self.is_prepared = True
+                        return {"role": self.role, "reason": "forbidden_no_gui", "error": str(err)}
+                else:
+                    logger.warning(
+                        f"Сервер-сейф недоступен ({err}). Переход в автономный режим (OFFLINE)."
+                    )
+                    show_role_banner(
+                        "Сервер-сейф недоступен. Игра запущена в автономном режиме.",
+                        duration_sec=7.0,
+                    )
+                    self.role = RoleType.OFFLINE
+                    self.is_prepared = True
+                    return {
+                        "role": self.role,
+                        "reason": "server_unreachable",
+                        "error": str(err),
+                    }
 
             state = status.get("state") or status.get("session", {}).get("state", "idle")
 
@@ -321,7 +441,7 @@ class SessionOrchestrator:
             if state == "uploading_final":
                 logger.info("Предыдущий хост выгружает сейф. Запуск ожидания передачи эстафеты...")
                 show_role_banner(
-                    "⏳ Предыдущий Хост сохраняет мир в облако, подождите пару секунд...",
+                    "Предыдущий Хост сохраняет мир в облако, подождите пару секунд...",
                     duration_sec=5.0,
                 )
                 status = self.hub_client.wait_if_uploading_final(
@@ -360,7 +480,7 @@ class SessionOrchestrator:
 
                     # Баннер Хоста
                     show_role_banner(
-                        "🟢 Вы — Хост! Зайдите в: Сетевая игра -> Запустить сохранённую игру -> cloud_world",
+                        "Вы — Хост! Зайдите в: Сетевая игра -> Запустить сохранённую игру -> cloud_world",
                         duration_sec=10.0,
                     )
 
@@ -414,7 +534,7 @@ class SessionOrchestrator:
             copy_to_clipboard(proxy_address)
 
             show_role_banner(
-                f"🔵 Сейчас хостит {current_host}! Зайдите в: Сетевая игра -> Прямое подключение -> Подключиться",
+                f"Сейчас хостит {current_host}! Зайдите в: Сетевая игра -> Прямое подключение -> Подключиться",
                 duration_sec=10.0,
             )
 

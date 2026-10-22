@@ -38,6 +38,18 @@ def _create_zip(path: Path, content: str = "test_data") -> Path:
     return path
 
 
+@pytest.fixture(autouse=True)
+def set_test_device_token():
+    """Устанавливает тестовый device_token для беспрепятственного запуска сессий в тестах."""
+    old_token = os.environ.get("FACTORIO_DEVICE_TOKEN")
+    os.environ["FACTORIO_DEVICE_TOKEN"] = "test_dev_token_wrapper"
+    yield
+    if old_token is not None:
+        os.environ["FACTORIO_DEVICE_TOKEN"] = old_token
+    else:
+        os.environ.pop("FACTORIO_DEVICE_TOKEN", None)
+
+
 @pytest.fixture
 def test_env(tmp_path: Path) -> FactorioEnvironment:
     """Создает изолированное окружение FactorioEnvironment во временной директории."""
@@ -155,7 +167,7 @@ def test_t10_2_1_claim_host_when_idle(test_env: FactorioEnvironment):
 
         # Проверка показа баннера Хоста
         mock_banner.assert_called_once()
-        assert "🟢 Вы — Хост!" in mock_banner.call_args[0][0]
+        assert "Вы — Хост!" in mock_banner.call_args[0][0]
 
         # Проверка запуска HostP2PBridge и HostWorkersManager
         mock_bridge.start.assert_called_once()
@@ -227,7 +239,7 @@ def test_t10_3_1_guest_role_when_server_busy(test_env: FactorioEnvironment):
 
         # Проверка баннера с именем Хоста
         mock_banner.assert_called_once()
-        assert "🔵 Сейчас хостит Dima!" in mock_banner.call_args[0][0]
+        assert "Сейчас хостит Dima!" in mock_banner.call_args[0][0]
 
         # Проверка запуска прокси и фонового монитора эстафеты
         mock_proxy.start.assert_called_once()
@@ -291,8 +303,8 @@ def test_t10_4_1_wait_if_uploading_final(test_env: FactorioEnvironment):
         # Было вызвано как минимум 2 баннера: ожидание и баннер Хоста
         assert mock_banner.call_count >= 2
         calls = [c[0][0] for c in mock_banner.call_args_list]
-        assert any("⏳ Предыдущий Хост" in c for c in calls)
-        assert any("🟢 Вы — Хост!" in c for c in calls)
+        assert any("Предыдущий Хост" in c for c in calls)
+        assert any("Вы — Хост!" in c for c in calls)
 
 
 # ============================================================================
@@ -335,7 +347,7 @@ def test_t10_5_1_guest_handover_watcher_lifecycle(test_env: FactorioEnvironment)
     # Проверка, что сейв восстановлен и скачан
     mock_hub.sync_save_before_host.assert_called_once()
     mock_banner.assert_called_once()
-    assert "👑 Хост LeavingHost вышел!" in mock_banner.call_args[0][0]
+    assert "Хост LeavingHost вышел!" in mock_banner.call_args[0][0]
 
 
 # ============================================================================
@@ -404,7 +416,7 @@ def test_t10_6_3_offline_mode_resilience(test_env: FactorioEnvironment):
     assert orchestrator.role == RoleType.OFFLINE
     assert report["reason"] == "server_unreachable"
     mock_banner.assert_called_once()
-    assert "⚠️ Сервер-сейф недоступен" in mock_banner.call_args[0][0]
+    assert "Сервер-сейф недоступен" in mock_banner.call_args[0][0]
 
 
 def test_t10_6_4_locate_core_executable_and_cli_args(tmp_path: Path):

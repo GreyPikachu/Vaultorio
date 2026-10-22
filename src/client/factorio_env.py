@@ -65,6 +65,18 @@ class FactorioEnvironment:
         self.player_data_path = self.user_data_dir / "player-data.json"
         self.log_file_path = self.user_data_dir / "factorio-current.log"
 
+    @property
+    def sync_config_path(self) -> Path:
+        """Возвращает актуальный путь к файлу конфигурации factorio_sync_config.json.
+
+        Приоритет:
+        1. Если файл уже существует в game_root — использовать его.
+        2. Иначе стандартный путь в user_data_dir.
+        """
+        if self.game_root and (self.game_root / "factorio_sync_config.json").is_file():
+            return self.game_root / "factorio_sync_config.json"
+        return self.user_data_dir / "factorio_sync_config.json"
+
     def ensure_dirs(self) -> None:
         """Создает необходимые служебные директории, если они не существуют."""
         try:

@@ -105,6 +105,7 @@ def make_test_client(
         player_name=player_name,
         guest_proxy_port=guest_proxy_port,
         host_factorio_port=host_factorio_port,
+        device_token=f"test_token_{player_name}",
     )
 
     test_http_client = TestClient(app)

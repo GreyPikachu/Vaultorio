@@ -48,6 +48,7 @@ def build_wrapper(
 
     cmd = get_pyinstaller_command() + [
         "--onefile",
+        "--noconsole",
         "--name", "factorio_wrapper",
         "--distpath", str(dist_dir),
         "--workpath", str(work_dir / "wrapper_build"),
@@ -61,7 +62,12 @@ def build_wrapper(
         "--hidden-import", "src.client.host_workers",
         "--hidden-import", "src.client.p2p_tunnel",
         "--hidden-import", "src.client.session_orchestrator",
+        "--hidden-import", "src.client.setup_gui",
         "--hidden-import", "src.client.ui_notifier",
+        "--hidden-import", "tkinter",
+        "--hidden-import", "tkinter.ttk",
+        "--hidden-import", "tkinter.filedialog",
+        "--hidden-import", "tkinter.messagebox",
         "--hidden-import", "httpx",
     ]
 
@@ -101,6 +107,7 @@ def build_installer(
 
     cmd = get_pyinstaller_command() + [
         "--onefile",
+        "--noconsole",
         "--name", "Factorio Coop Setup",
         "--distpath", str(dist_dir),
         "--workpath", str(work_dir / "installer_build"),
@@ -110,7 +117,14 @@ def build_installer(
         "--hidden-import", "src.installer",
         "--hidden-import", "src.installer.installer",
         "--hidden-import", "src.client",
+        "--hidden-import", "src.client.config",
         "--hidden-import", "src.client.factorio_env",
+        "--hidden-import", "src.client.hub_client",
+        "--hidden-import", "src.client.setup_gui",
+        "--hidden-import", "tkinter",
+        "--hidden-import", "tkinter.ttk",
+        "--hidden-import", "tkinter.filedialog",
+        "--hidden-import", "tkinter.messagebox",
     ]
 
     # Если собран бинарник перехватчика, упаковываем его внутрь установщика

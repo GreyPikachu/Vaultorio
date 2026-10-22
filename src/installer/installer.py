@@ -218,6 +218,9 @@ class FactorioWrapperInstaller:
         stun_port: Optional[int] = None,
         min_original_size_bytes: int = 1024,
         system_override: Optional[str] = None,
+        device_token: Optional[str] = None,
+        device_id: Optional[str] = None,
+        client_config: Optional[Any] = None,
     ) -> Dict[str, Any]:
         """Выполняет безопасную установку перехватчика в каталог Factorio.
 
@@ -230,10 +233,24 @@ class FactorioWrapperInstaller:
             stun_port: Порт STUN/P2P-координатора.
             min_original_size_bytes: Минимальный допустимый размер оригинального бинарника.
             system_override: Принудительное указание ОС для тестирования.
+            device_token: Постоянный токен авторизации устройства.
+            device_id: Идентификатор устройства.
+            client_config: Готовый объект ClientConfig (если активирован инвайт).
 
         Returns:
             Отчет об установке.
         """
+        # Извлечение параметров из client_config, если передан
+        if client_config is not None:
+            hub_url = getattr(client_config, "hub_http_url", hub_url)
+            stun_host = getattr(client_config, "hub_stun_host", stun_host)
+            stun_port = getattr(client_config, "hub_stun_port", stun_port)
+            device_token = getattr(client_config, "device_token", device_token)
+            device_id = getattr(client_config, "device_id", device_id)
+            cfg_pname = getattr(client_config, "player_name", None)
+            if cfg_pname and str(cfg_pname).strip():
+                player_name = str(cfg_pname).strip()
+
         # Шаг 1: Валидация никнейма игрока
         clean_name = str(player_name).strip()
         if not clean_name:
@@ -323,11 +340,23 @@ class FactorioWrapperInstaller:
             "hub_stun_host": stun_host or self.default_stun_host,
             "hub_stun_port": stun_port or self.default_stun_port,
             "player_name": clean_name,
+            "device_token": device_token or "",
+            "device_id": device_id or "",
             "is_update": is_update,
         }
         sync_cfg_path = gdir / "factorio_sync_config.json"
         sync_cfg_path.write_text(json.dumps(config_data, indent=2, ensure_ascii=False), encoding="utf-8")
         logger.info(f"Конфигурация синхронизации сохранена в {sync_cfg_path.name}")
+
+        # Также сохраняем в user_data_dir (если пути отличаются)
+        try:
+            user_cfg_path = env.sync_config_path
+            if user_cfg_path.resolve() != sync_cfg_path.resolve():
+                user_cfg_path.parent.mkdir(parents=True, exist_ok=True)
+                user_cfg_path.write_text(json.dumps(config_data, indent=2, ensure_ascii=False), encoding="utf-8")
+                logger.info(f"Конфигурация синхронизации также сохранена в {user_cfg_path}")
+        except Exception as sync_write_err:
+            logger.debug(f"Не удалось дополнительно сохранить конфиг в user_data_dir: {sync_write_err}")
 
         return {
             "status": "installed",
@@ -420,6 +449,50 @@ class FactorioWrapperInstaller:
             f"Проверьте правильность указания директории игры."
         )
 
+    def run_gui(
+        self,
+        custom_game_dir: Optional[Path | str] = None,
+        wrapper_bin: Optional[Path | str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Запускает графический установщик FirstRunSetupWindow в режиме installer_mode=True."""
+        try:
+            from src.client.setup_gui import run_first_time_setup_gui
+        except ImportError:
+            return None
+
+        game_path: Optional[Path] = None
+        try:
+            game_path = self.find_game_installation(custom_path=custom_game_dir)
+        except Exception:
+            pass
+
+        env = FactorioEnvironment(custom_game_root=game_path)
+        install_result: Dict[str, Any] = {}
+
+        def _do_install(target_game_dir: Path, player_name: str, cfg: Any) -> None:
+            res = self.install(
+                game_dir=target_game_dir,
+                player_name=player_name,
+                wrapper_binary_path=wrapper_bin,
+                client_config=cfg,
+            )
+            install_result.update(res)
+
+        def _do_uninstall(target_game_dir: Path) -> Any:
+            return self.uninstall(game_dir=target_game_dir)
+
+        cfg_res = run_first_time_setup_gui(
+            env=env,
+            installer_mode=True,
+            on_install_callback=_do_install,
+            on_uninstall_callback=_do_uninstall,
+        )
+
+        if cfg_res is not None or install_result:
+            return install_result or {"status": "installed", "config": cfg_res}
+
+        return None
+
     def interactive_menu(self) -> int:
         """Интерактивное консольное меню для пользователей."""
         print("=" * 65)
@@ -490,27 +563,51 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--player-name", type=str, default=None, help="Уникальный никнейм игрока")
     parser.add_argument("--wrapper-bin", type=str, default=None, help="Путь к скомпилированному бинарнику перехватчика")
     parser.add_argument("--hub-url", type=str, default=None, help="URL сервера-сейфа")
+    parser.add_argument("--invite-code", type=str, default=None, help="Одноразовый Код Дружбы FCT1-...")
+    parser.add_argument("--passphrase", type=str, default=None, help="Секретное слово инвайта")
+    parser.add_argument("--cli", action="store_true", help="Принудительно использовать консольный интерфейс вместо GUI")
 
     args = parser.parse_args(argv)
     installer = FactorioWrapperInstaller(
         default_hub_url=args.hub_url or "http://127.0.0.1:8088",
     )
 
-    # Если параметры не переданы — запуск интерактивного меню
+    # Если параметры не переданы — запуск GUI установщика (при отсутствии дисплея откат на консоль)
     if not args.install and not args.uninstall:
+        if not args.cli:
+            gui_res = installer.run_gui(custom_game_dir=args.game_dir, wrapper_bin=args.wrapper_bin)
+            if gui_res is not None:
+                print("Установка через графический интерфейс успешно завершена.")
+                return 0
         return installer.interactive_menu()
 
     try:
         game_path = installer.find_game_installation(custom_path=args.game_dir)
 
         if args.install:
-            if not args.player_name:
-                print("ОШИБКА: Для установки требуется указать --player-name <имя>.")
+            clean_player = args.player_name
+            cfg = None
+
+            if args.invite_code and args.passphrase:
+                from src.client.hub_client import HubClient
+                if not clean_player:
+                    temp_env = FactorioEnvironment(custom_game_root=game_path)
+                    clean_player = temp_env.resolve_or_init_player_username()
+                cfg = HubClient.activate_with_invite_code(
+                    invite_code=args.invite_code,
+                    passphrase=args.passphrase,
+                    player_name=clean_player,
+                )
+
+            if not clean_player:
+                print("ОШИБКА: Для установки требуется указать --player-name <имя> (или --invite-code и --passphrase).")
                 return 1
+
             res = installer.install(
                 game_dir=game_path,
-                player_name=args.player_name,
+                player_name=clean_player,
                 wrapper_binary_path=args.wrapper_bin,
+                client_config=cfg,
             )
             print(f"Успешно установлено: {res['game_binary']} (Игрок: {res['player_name']})")
             return 0
