@@ -24,6 +24,7 @@ from src.client.host_workers import (
     LobbyStartDetector,
     find_latest_session_save,
     flush_final_save_on_exit,
+    parse_loaded_map_from_log,
 )
 from src.client.hub_client import HubClient
 
@@ -569,4 +570,244 @@ def test_t8_6_3_heartbeat_worker_handles_network_error():
     )
 
     assert worker.send_once() is None
+
+
+# ============================================================================
+# Задача 017: Изоляция одиночной игры и не-серверных карт
+# ============================================================================
+
+
+def test_t017_1_parse_loaded_map_from_log():
+    """Задача 017: Парсинг имени загруженной карты из factorio-current.log (Unix & Windows)."""
+    # 1. Unix-путь
+    unix_log = (
+        "0.000 Initializing Factorio...\n"
+        "1.234 Loading map /Users/test/Library/Application Support/factorio/saves/cloud_world.zip: 789123 bytes.\n"
+        "1.500 Map version 1.1.100\n"
+    )
+    assert parse_loaded_map_from_log(unix_log) == "cloud_world.zip"
+
+    # 2. Windows-путь с обратными слэшами
+    win_log = (
+        "0.000 Initializing Factorio...\n"
+        "2.100 Loading map C:\\Users\\Gamer\\AppData\\Roaming\\Factorio\\saves\\MySoloCampaign.zip: 1234567 bytes.\n"
+    )
+    assert parse_loaded_map_from_log(win_log) == "MySoloCampaign.zip"
+
+    # 3. Несколько загрузок в одном логе (возвращает самую последнюю)
+    multi_log = (
+        "Loading map /saves/FirstWorld.zip: 100 bytes.\n"
+        "Info: Returned to menu.\n"
+        "Loading map /saves/SecondWorld.zip: 200 bytes.\n"
+    )
+    assert parse_loaded_map_from_log(multi_log) == "SecondWorld.zip"
+
+    # 4. Создание нового мира с нуля (нет Loading map)
+    new_map_log = (
+        "0.000 Initializing Factorio...\n"
+        "1.000 Creating new map\n"
+        "2.000 Map generated successfully\n"
+    )
+    assert parse_loaded_map_from_log(new_map_log) is None
+
+    # 5. Граничные случаи
+    assert parse_loaded_map_from_log("") is None
+    assert parse_loaded_map_from_log(None) is None  # type: ignore[arg-type]
+
+
+def test_t017_2_detector_releases_host_on_non_cloud_map(tmp_path: Path):
+    """Задача 017: Детектор немедленно освобождает слот Хоста при загрузке сторонней карты."""
+    log_file = tmp_path / "factorio-current.log"
+    log_file.write_text("0.000 Init...\n", encoding="utf-8")
+
+    mock_client = MagicMock(spec=HubClient)
+    mock_client.release_host.return_value = True
+
+    non_cloud_called_with = None
+
+    def on_non_cloud(map_name: str):
+        nonlocal non_cloud_called_with
+        non_cloud_called_with = map_name
+
+    detector = LobbyStartDetector(
+        log_path=log_file,
+        hub_client=mock_client,
+        session_token="token_local_map",
+        target_save_name="cloud_world.zip",
+        factorio_port=0,
+        on_non_cloud_game=on_non_cloud,
+    )
+
+    # Игрок загружает личную карту
+    with open(log_file, "a", encoding="utf-8") as f:
+        f.write("1.234 Loading map /Users/test/saves/MyPersonalBase.zip: 555555 bytes.\n")
+
+    res = detector.check_once()
+    assert res is False
+    assert detector.is_confirmed is False
+    assert detector.is_non_cloud_game is True
+    assert detector.loaded_map_name == "MyPersonalBase.zip"
+    assert non_cloud_called_with == "MyPersonalBase.zip"
+    mock_client.release_host.assert_called_once_with("token_local_map", reason="local_map:MyPersonalBase.zip")
+    mock_client.confirm_hosting.assert_not_called()
+
+    # Даже если позже появятся маркеры хостинга, они блокируются
+    with open(log_file, "a", encoding="utf-8") as f:
+        f.write("2.000 Hosting game at 0.0.0.0:34197\n")
+
+    res2 = detector.check_once()
+    assert res2 is False
+    assert detector.is_confirmed is False
+    mock_client.confirm_hosting.assert_not_called()
+
+
+def test_t017_3_detector_removes_save_appearance_false_positive(tmp_path: Path):
+    """Задача 017: Появление автосейва без сетевых маркеров и без порта НЕ активирует хостинг."""
+    log_file = tmp_path / "factorio-current.log"
+    log_file.write_text("0.000 Single player session...\n", encoding="utf-8")
+
+    saves_dir = tmp_path / "saves"
+    saves_dir.mkdir()
+
+    session_start = time.time()
+    # Создаем свежий автосейв одиночной игры
+    _create_zip(saves_dir / "_autosave1.zip", mtime=session_start + 10.0)
+
+    mock_client = MagicMock(spec=HubClient)
+
+    detector = LobbyStartDetector(
+        log_path=log_file,
+        hub_client=mock_client,
+        session_token="token_solo_false_positive",
+        saves_dir=saves_dir,
+        session_start_time=session_start,
+        factorio_port=0,  # сокет не слушается
+    )
+
+    # Проверяем: появление сейва НЕ должно активировать сетевой хостинг
+    assert detector.check_once() is False
+    assert detector.is_confirmed is False
+    mock_client.confirm_hosting.assert_not_called()
+
+
+def test_t017_4_flush_final_save_skips_when_non_cloud_game(tmp_path: Path):
+    """Задача 017: При выходе из не-облачной игры cloud_world.zip не перезаписывается и ничего не выгружается."""
+    saves_dir = tmp_path / "saves"
+    saves_dir.mkdir()
+
+    # Исходный облачный сейв
+    canonical_save = saves_dir / "cloud_world.zip"
+    _create_zip(canonical_save, content="ORIGINAL_CLOUD_SAVE", mtime=1000.0)
+
+    # Локальный автосейв одиночной игры
+    _create_zip(saves_dir / "_autosave1.zip", content="SOLO_CORRUPTING_CONTENT", mtime=2000.0)
+
+    mock_client = MagicMock(spec=HubClient)
+    mock_client.release_host.return_value = True
+
+    res = flush_final_save_on_exit(
+        saves_dir=saves_dir,
+        hub_client=mock_client,
+        session_token="token_local_exit",
+        is_hosting_confirmed=False,
+        session_start_time=1500.0,
+        target_save_name="cloud_world.zip",
+        is_non_cloud_game=True,
+        loaded_map_name="MySoloRun.zip",
+    )
+
+    assert res["action"] == "ignored_local_game"
+    assert res["reason"] == "non_cloud_map"
+    assert res["loaded_map"] == "MySoloRun.zip"
+    assert res["released"] is True
+
+    # Проверяем, что upload_save не вызывался
+    mock_client.upload_save.assert_not_called()
+    mock_client.release_host.assert_called_once_with("token_local_exit", reason="local_map_exit:MySoloRun.zip")
+
+    # Исходный cloud_world.zip остался нетронутым
+    with zipfile.ZipFile(canonical_save, "r") as zf:
+        content = zf.read("cloud_world/level.dat").decode("utf-8")
+        assert content == "ORIGINAL_CLOUD_SAVE"
+
+
+def test_t017_5_find_latest_session_save_respects_allowed_save_names(tmp_path: Path):
+    """Задача 017: find_latest_session_save игнорирует неразрешенные сохранения одиночной игры."""
+    saves_dir = tmp_path / "saves"
+    saves_dir.mkdir()
+
+    session_start = 1000.0
+    unrelated_solo = saves_dir / "UnrelatedSoloMap.zip"
+    cloud_world = saves_dir / "cloud_world.zip"
+    autosave = saves_dir / "_autosave1.zip"
+
+    _create_zip(cloud_world, mtime=session_start + 10.0)
+    _create_zip(autosave, mtime=session_start + 20.0)
+    _create_zip(unrelated_solo, mtime=session_start + 50.0)  # Самый свежий, но посторонний!
+
+    # С фильтром allowed_save_names={"cloud_world.zip"}:
+    # unrelated_solo.zip должен быть отфильтрован, а выбран _autosave1.zip
+    freshest = find_latest_session_save(
+        saves_dir,
+        session_start_time=session_start,
+        allowed_save_names={"cloud_world.zip"},
+    )
+    assert freshest is not None
+    assert freshest.name == "_autosave1.zip"
+
+    # Если есть ТОЛЬКО посторонний сейв
+    saves_dir2 = tmp_path / "saves2"
+    saves_dir2.mkdir()
+    _create_zip(saves_dir2 / "OtherMap.zip", mtime=session_start + 50.0)
+
+    freshest2 = find_latest_session_save(
+        saves_dir2,
+        session_start_time=session_start,
+        allowed_save_names={"cloud_world.zip"},
+    )
+    assert freshest2 is None
+
+
+def test_t017_6_host_workers_manager_handles_non_cloud_lifecycle(tmp_path: Path):
+    """Задача 017: HostWorkersManager останавливает фоновые службы и безопасно завершает сессию при не-серверной карте."""
+    log_file = tmp_path / "factorio-current.log"
+    log_file.write_text("0.000 Init\n", encoding="utf-8")
+
+    saves_dir = tmp_path / "saves"
+    saves_dir.mkdir()
+    _create_zip(saves_dir / "cloud_world.zip", content="ORIGINAL", mtime=1000.0)
+
+    mock_client = MagicMock(spec=HubClient)
+    mock_client.release_host.return_value = True
+
+    manager = HostWorkersManager(
+        log_path=log_file,
+        saves_dir=saves_dir,
+        hub_client=mock_client,
+        session_token="token_mgr_non_cloud",
+        target_save_name="cloud_world.zip",
+        detector_check_interval=0.05,
+        heartbeat_interval_sec=0.1,
+        autosave_poll_interval_sec=0.1,
+    )
+
+    manager.start()
+
+    # Игрок загружает локальный мир
+    with open(log_file, "a", encoding="utf-8") as f:
+        f.write("1.000 Loading map /saves/SingleplayerBase.zip: 12345 bytes.\n")
+
+    time.sleep(0.15)
+
+    assert manager.detector.is_non_cloud_game is True
+    assert manager.detector.loaded_map_name == "SingleplayerBase.zip"
+
+    # Завершаем игру
+    exit_report = manager.on_game_exit()
+    assert exit_report["action"] == "ignored_local_game"
+    assert exit_report["reason"] == "non_cloud_map"
+    assert exit_report["loaded_map"] == "SingleplayerBase.zip"
+
+    mock_client.upload_save.assert_not_called()
+
 

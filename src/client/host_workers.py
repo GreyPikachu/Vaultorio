@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shutil
 import socket
 import tempfile
@@ -27,16 +28,48 @@ from src.client.hub_client import HubClient, compute_file_sha256
 logger = logging.getLogger("factorio_hub.host_workers")
 
 
+def parse_loaded_map_from_log(log_text: str) -> str | None:
+    """Парсит имя загруженной карты (.zip) из фрагмента factorio-current.log.
+
+    Движок Factorio при загрузке любого сохранения пишет в лог:
+    Loading map /path/to/saves/<map_name>.zip
+    или на Windows:
+    Loading map C:\\Users\\...\\saves\\<map_name>.zip
+
+    Args:
+        log_text: Текстовый фрагмент лога Factorio.
+
+    Returns:
+        Имя файла сохранения (например, 'cloud_world.zip' или 'PersonalBase.zip')
+        или None, если событие загрузки карты не найдено.
+    """
+    if not log_text or not isinstance(log_text, str):
+        return None
+
+    # Ищем паттерн 'Loading map' с путем до .zip файла
+    # Поддерживает и Unix /, и Windows \\ разделители
+    pattern = r"Loading map\s+(?:.*[/\\])?([^/\\\r\n]+\.zip)"
+    matches = re.findall(pattern, log_text, flags=re.IGNORECASE)
+    if not matches:
+        return None
+
+    # Возвращаем имя последней загруженной карты в этом фрагменте
+    latest_map = matches[-1].strip()
+    return latest_map if latest_map else None
+
+
 def find_latest_session_save(
     saves_dir: Path,
     session_start_time: float,
     min_mtime_margin: float = 2.0,
+    allowed_save_names: set[str] | list[str] | None = None,
 ) -> Path | None:
     """Ищет самый свежий валидный ZIP-архив сохранения, созданный или измененный за текущую сессию.
 
     Сравнивает время модификации файлов с (session_start_time - min_mtime_margin),
     проверяет целостность архива через zipfile.is_zipfile и возвращает путь
     к файлу с максимальным st_mtime.
+    При указании allowed_save_names учитывает только указанные файлы и файлы автосейвов (_autosave*.zip).
     """
     if not isinstance(saves_dir, Path):
         saves_dir = Path(saves_dir)
@@ -44,6 +77,10 @@ def find_latest_session_save(
     if not saves_dir.is_dir():
         logger.debug(f"Каталог сохранений не найден: {saves_dir}")
         return None
+
+    allowed_lower: set[str] | None = None
+    if allowed_save_names:
+        allowed_lower = {n.lower() for n in allowed_save_names}
 
     cutoff_mtime = session_start_time - min_mtime_margin
     candidates: list[tuple[float, Path]] = []
@@ -56,6 +93,11 @@ def find_latest_session_save(
                 continue
             if not entry.name.lower().endswith(".zip"):
                 continue
+
+            entry_lower = entry.name.lower()
+            if allowed_lower is not None:
+                if entry_lower not in allowed_lower and not entry_lower.startswith("_autosave"):
+                    continue
 
             try:
                 stat = entry.stat()
@@ -103,6 +145,8 @@ class LobbyStartDetector:
         session_start_time: float | None = None,
         on_confirmed: Callable[[], None] | None = None,
         on_timeout: Callable[[], None] | None = None,
+        target_save_name: str = "cloud_world.zip",
+        on_non_cloud_game: Callable[[str], None] | None = None,
     ) -> None:
         if not session_token:
             raise ValueError("session_token не может быть пустым")
@@ -117,9 +161,13 @@ class LobbyStartDetector:
         self.session_start_time = float(session_start_time if session_start_time is not None else time.time())
         self.on_confirmed = on_confirmed
         self.on_timeout = on_timeout
+        self.target_save_name = str(target_save_name or "cloud_world.zip")
+        self.on_non_cloud_game = on_non_cloud_game
 
         self._is_confirmed = False
         self._is_timed_out = False
+        self._is_non_cloud_game = False
+        self._loaded_map_name: str | None = None
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
@@ -148,12 +196,24 @@ class LobbyStartDetector:
         with self._lock:
             return self._is_timed_out
 
+    @property
+    def is_non_cloud_game(self) -> bool:
+        with self._lock:
+            return self._is_non_cloud_game
+
+    @property
+    def loaded_map_name(self) -> str | None:
+        with self._lock:
+            return self._loaded_map_name
+
     def check_once(self) -> bool:
         """Выполняет разовую проверку индикаторов старта лобби или истечения таймаута."""
         with self._lock:
             if self._is_confirmed:
                 return True
             if self._is_timed_out:
+                return False
+            if self._is_non_cloud_game:
                 return False
 
         # Проверка таймаута
@@ -191,6 +251,34 @@ class LobbyStartDetector:
                     self._log_seek_pos = f.tell()
 
                 if new_content:
+                    # Проверяем, какую карту загрузил игрок
+                    loaded_map = parse_loaded_map_from_log(new_content)
+                    if loaded_map:
+                        with self._lock:
+                            self._loaded_map_name = loaded_map
+                        clean_loaded = loaded_map.lower()
+                        clean_target = self.target_save_name.lower()
+                        if clean_loaded != clean_target and not clean_loaded.startswith("_autosave"):
+                            logger.info(
+                                f"Игрок загрузил локальный не-серверный мир '{loaded_map}' вместо '{self.target_save_name}'. "
+                                "Освобождаем слот Хоста на сервере и отключаем сетевую синхронизацию."
+                            )
+                            with self._lock:
+                                self._is_non_cloud_game = True
+                                self._is_confirmed = False
+
+                            try:
+                                self.hub_client.release_host(self.session_token, reason=f"local_map:{loaded_map}")
+                            except Exception as rel_err:
+                                logger.warning(f"Ошибка при освобождении слота (local_map): {rel_err}")
+
+                            if self.on_non_cloud_game:
+                                try:
+                                    self.on_non_cloud_game(loaded_map)
+                                except Exception as cb_err:
+                                    logger.error(f"Ошибка в callback on_non_cloud_game: {cb_err}")
+                            return False
+
                     keywords = [
                         "Hosting game at",
                         "ServerRouter",
@@ -224,12 +312,9 @@ class LobbyStartDetector:
             except Exception as err:
                 logger.debug(f"Ошибка проверки UDP-порта {self.factorio_port}: {err}")
 
-        # 3. Проверка изменения сохранений за сессию
-        if not detected and self.saves_dir and self.saves_dir.is_dir():
-            latest = find_latest_session_save(self.saves_dir, self.session_start_time, min_mtime_margin=0.0)
-            if latest is not None:
-                detected = True
-                detection_reason = f"найдено свежее сохранение сессии {latest.name}"
+        with self._lock:
+            if self._is_non_cloud_game:
+                return False
 
         if detected:
             logger.info(f"Обнаружен реальный запуск сетевого лобби ({detection_reason})")
@@ -371,6 +456,7 @@ class AutosaveWatcher:
         upload_cooldown_sec: float = 120.0,
         is_confirmed_getter: Callable[[], bool] | None = None,
         mod_list: list[dict] | None = None,
+        target_save_name: str = "cloud_world.zip",
     ) -> None:
         if not session_token:
             raise ValueError("session_token не может быть пустым")
@@ -383,6 +469,7 @@ class AutosaveWatcher:
         self.upload_cooldown_sec = max(0.01, float(upload_cooldown_sec))
         self.is_confirmed_getter = is_confirmed_getter
         self.mod_list = mod_list
+        self.target_save_name = str(target_save_name or "cloud_world.zip")
 
         self.last_uploaded_sha256: str | None = None
         self.last_upload_time: float = 0.0
@@ -405,7 +492,11 @@ class AutosaveWatcher:
                 )
                 return False
 
-        latest_save = find_latest_session_save(self.saves_dir, self.session_start_time)
+        latest_save = find_latest_session_save(
+            self.saves_dir,
+            self.session_start_time,
+            allowed_save_names={self.target_save_name},
+        )
         if latest_save is None:
             return False
 
@@ -495,17 +586,38 @@ def flush_final_save_on_exit(
     is_hosting_confirmed: bool,
     session_start_time: float,
     mod_list: list[dict] | None = None,
+    target_save_name: str = "cloud_world.zip",
+    is_non_cloud_game: bool = False,
+    loaded_map_name: str | None = None,
 ) -> dict:
     """Выполняет финализацию сохранения при закрытии процесса игры.
 
-    1. Если хостинг НЕ был подтвержден (игрок закрыл игру из главного меню или не открыл мультиплеер):
+    1. Если обнаружен запуск локальной/не-серверной карты (is_non_cloud_game=True):
+       НЕ перезаписывает cloud_world.zip, отменяет выгрузку и освобождает слот на сервере.
+    2. Если хостинг НЕ был подтвержден (игрок закрыл игру из главного меню или не открыл мультиплеер):
        НЕ перезаписывает серверный сейв, а мгновенно освобождает слот через release_host.
-    2. Если хостинг был активен:
+    3. Если хостинг был активен для целевого серверного мира:
        Находит самый свежий файл сессии (включая _autosaveN.zip при выходе без ручного сохранения),
-       атомарно обновляет saves/cloud_world.zip и отправляет его на VPS с release_on_success=True.
+       атомарно обновляет целевой сейв (target_save_name) и отправляет его на VPS с release_on_success=True.
     """
     if not isinstance(saves_dir, Path):
         saves_dir = Path(saves_dir)
+
+    if is_non_cloud_game:
+        logger.info(
+            f"Игра завершена в локальном/не-серверном режиме (карта: {loaded_map_name}). "
+            f"Серверный сейв '{target_save_name}' не перезаписывается, выгрузка отменена."
+        )
+        try:
+            hub_client.release_host(session_token, reason=f"local_map_exit:{loaded_map_name or 'unknown'}")
+        except Exception as err:
+            logger.warning(f"Ошибка при освобождении слота (local_map_exit): {err}")
+        return {
+            "action": "ignored_local_game",
+            "reason": "non_cloud_map",
+            "loaded_map": loaded_map_name,
+            "released": True,
+        }
 
     if not is_hosting_confirmed:
         logger.info("Игра закрыта без подтверждения хостинга (в меню). Освобождаем слот без выгрузки сейва.")
@@ -519,25 +631,29 @@ def flush_final_save_on_exit(
             "released": True,
         }
 
-    # Игрок реально играл в сетевом режиме
-    freshest_save = find_latest_session_save(saves_dir, session_start_time)
-    canonical_save = saves_dir / "cloud_world.zip"
+    # Игрок реально играл в сетевом режиме в целевой мир
+    freshest_save = find_latest_session_save(
+        saves_dir,
+        session_start_time,
+        allowed_save_names={target_save_name},
+    )
+    canonical_save = saves_dir / target_save_name
 
     target_save_to_upload: Path | None = None
 
     if freshest_save is not None:
-        # Если самым свежим оказался автосейв, копируем его в канонический cloud_world.zip
+        # Если самым свежим оказался автосейв, копируем его в канонический файл
         if freshest_save.resolve() != canonical_save.resolve():
             logger.info(
                 f"Самым свежим файлом сессии является автосейв {freshest_save.name}. "
                 f"Атомарно обновляем {canonical_save.name}."
             )
-            temp_copy = saves_dir / f"cloud_world_{int(time.time())}.tmp"
+            temp_copy = saves_dir / f"{canonical_save.stem}_{int(time.time())}.tmp"
             try:
                 shutil.copy2(freshest_save, temp_copy)
                 os.replace(temp_copy, canonical_save)
             except Exception as copy_err:
-                logger.error(f"Ошибка атомарного обновления cloud_world.zip: {copy_err}")
+                logger.error(f"Ошибка атомарного обновления {canonical_save.name}: {copy_err}")
                 if temp_copy.exists():
                     try:
                         temp_copy.unlink()
@@ -545,7 +661,7 @@ def flush_final_save_on_exit(
                         pass
         target_save_to_upload = canonical_save
     elif canonical_save.exists() and zipfile.is_zipfile(canonical_save):
-        logger.info("Новых сейвов за сессию не обнаружено, выгружаем существующий cloud_world.zip")
+        logger.info(f"Новых сейвов за сессию не обнаружено, выгружаем существующий {canonical_save.name}")
         target_save_to_upload = canonical_save
 
     if target_save_to_upload is not None and target_save_to_upload.exists():
@@ -607,6 +723,8 @@ class HostWorkersManager:
         autosave_poll_interval_sec: float = 5.0,
         autosave_cooldown_sec: float = 120.0,
         mod_list: list[dict] | None = None,
+        target_save_name: str = "cloud_world.zip",
+        on_non_cloud_game: Callable[[str], None] | None = None,
     ) -> None:
         self.log_path = Path(log_path)
         self.saves_dir = Path(saves_dir)
@@ -615,6 +733,27 @@ class HostWorkersManager:
         self.session_start_time = float(session_start_time if session_start_time is not None else time.time())
         self.factorio_port = factorio_port
         self.mod_list = mod_list
+        self.target_save_name = str(target_save_name or "cloud_world.zip")
+        self.user_on_non_cloud_game = on_non_cloud_game
+
+        def _handle_non_cloud(map_name: str) -> None:
+            logger.info(
+                f"HostWorkersManager: обнаружен запуск не-серверной карты '{map_name}'. "
+                "Останавливаем фоновые службы."
+            )
+            try:
+                self.heartbeat.stop()
+            except Exception as e:
+                logger.warning(f"Ошибка остановки Heartbeat: {e}")
+            try:
+                self.autosave_watcher.stop()
+            except Exception as e:
+                logger.warning(f"Ошибка остановки AutosaveWatcher: {e}")
+            if self.user_on_non_cloud_game:
+                try:
+                    self.user_on_non_cloud_game(map_name)
+                except Exception as cb_err:
+                    logger.error(f"Ошибка в user_on_non_cloud_game: {cb_err}")
 
         self.detector = LobbyStartDetector(
             log_path=self.log_path,
@@ -625,13 +764,15 @@ class HostWorkersManager:
             check_interval=detector_check_interval,
             timeout_sec=detector_timeout_sec,
             session_start_time=self.session_start_time,
+            target_save_name=self.target_save_name,
+            on_non_cloud_game=_handle_non_cloud,
         )
 
         self.heartbeat = HeartbeatWorker(
             hub_client=self.hub_client,
             session_token=self.session_token,
             interval_sec=heartbeat_interval_sec,
-            is_confirmed_getter=lambda: self.detector.is_confirmed,
+            is_confirmed_getter=lambda: self.detector.is_confirmed and not self.detector.is_non_cloud_game,
             udp_port=self.factorio_port,
         )
 
@@ -642,8 +783,9 @@ class HostWorkersManager:
             session_start_time=self.session_start_time,
             poll_interval_sec=autosave_poll_interval_sec,
             upload_cooldown_sec=autosave_cooldown_sec,
-            is_confirmed_getter=lambda: self.detector.is_confirmed,
+            is_confirmed_getter=lambda: self.detector.is_confirmed and not self.detector.is_non_cloud_game,
             mod_list=self.mod_list,
+            target_save_name=self.target_save_name,
         )
 
     def start(self) -> None:
@@ -664,6 +806,8 @@ class HostWorkersManager:
         """Обработчик закрытия игрового процесса Factorio."""
         logger.info("Событие закрытия игры: останавливаем воркеры и финализируем сейв...")
         is_confirmed = self.detector.is_confirmed
+        is_non_cloud = self.detector.is_non_cloud_game
+        loaded_map = self.detector.loaded_map_name
         self.stop()
         return flush_final_save_on_exit(
             saves_dir=self.saves_dir,
@@ -672,4 +816,7 @@ class HostWorkersManager:
             is_hosting_confirmed=is_confirmed,
             session_start_time=self.session_start_time,
             mod_list=self.mod_list,
+            target_save_name=self.target_save_name,
+            is_non_cloud_game=is_non_cloud,
+            loaded_map_name=loaded_map,
         )

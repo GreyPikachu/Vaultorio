@@ -502,6 +502,7 @@ class SessionOrchestrator:
                         session_token=self.session_token,
                         factorio_port=self.config.host_factorio_port,
                         mod_list=self.env.get_active_mods_manifest(),
+                        target_save_name=self.env.cloud_save_name,
                     )
                     self.host_workers.start()
 
