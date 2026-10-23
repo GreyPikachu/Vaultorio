@@ -309,5 +309,96 @@ class TestZeroHardcodeGrep(unittest.TestCase):
         )
 
 
+class TestTask020NicknameProtectionAndAdminlist(unittest.TestCase):
+    """Агрессивные проверки Задачи 020: защита ника и автовосстановление из adminlist."""
+
+    def setUp(self):
+        self.temp_dir = Path(tempfile.mkdtemp(prefix="test_t020_"))
+        self.env = FactorioEnvironment(custom_user_data_dir=self.temp_dir)
+        self.env.ensure_dirs()
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_restore_nickname_from_adminlist_list_format(self):
+        """Восстановление ника graypikachu из списка server-adminlist.json при заглушке CliPlayer."""
+        self.env.player_data_path.write_text(json.dumps({"service-username": "CliPlayer"}), encoding="utf-8")
+        self.env.adminlist_path.write_text(json.dumps(["graypikachu", "friend_player"]), encoding="utf-8")
+
+        username = self.env.get_player_username()
+        self.assertEqual(username, "graypikachu")
+
+        # Проверка, что player-data.json автоматически исправлен
+        saved_data = json.loads(self.env.player_data_path.read_text(encoding="utf-8"))
+        self.assertEqual(saved_data.get("service-username"), "graypikachu")
+        self.assertEqual(saved_data.get("username"), "graypikachu")
+
+    def test_restore_nickname_from_adminlist_dict_format(self):
+        """Восстановление ника из словаря server-adminlist.json ({"admins": [...]})."""
+        self.env.player_data_path.write_text(json.dumps({"username": "engineer"}), encoding="utf-8")
+        self.env.adminlist_path.write_text(json.dumps({"admins": ["graypikachu"]}), encoding="utf-8")
+
+        username = self.env.get_player_username()
+        self.assertEqual(username, "graypikachu")
+
+    def test_restore_ignores_placeholder_names_in_adminlist(self):
+        """Если в adminlist первой строкой идет заглушка, берется следующее валидное имя."""
+        self.env.player_data_path.write_text(json.dumps({"service-username": "default"}), encoding="utf-8")
+        self.env.adminlist_path.write_text(json.dumps(["player", "default", "RealCommander"]), encoding="utf-8")
+
+        username = self.env.get_player_username()
+        self.assertEqual(username, "RealCommander")
+
+    def test_corrupt_adminlist_json_handled_gracefully(self):
+        """Поврежденный файл adminlist не вызывает исключений и не ломает чтение."""
+        self.env.player_data_path.write_text(json.dumps({"service-username": "CliPlayer"}), encoding="utf-8")
+        self.env.adminlist_path.write_text("{corrupt_json_syntax...", encoding="utf-8")
+
+        username = self.env.get_player_username()
+        # Возвращает текущее имя заглушки без краша
+        self.assertEqual(username, "CliPlayer")
+
+    def test_set_player_username_force_false_protects_existing(self):
+        """set_player_username(force=False) защищает существующий валидный никнейм."""
+        self.env.set_player_username("OriginalOwner", force=True)
+        res = self.env.set_player_username("MaliciousOverride", force=False)
+        self.assertEqual(res, "OriginalOwner")
+        self.assertEqual(self.env.get_player_username(), "OriginalOwner")
+
+    def test_set_player_username_force_true_overwrites(self):
+        """set_player_username(force=True) явно перезаписывает имя."""
+        self.env.set_player_username("OriginalOwner", force=True)
+        res = self.env.set_player_username("NewValidOwner", force=True)
+        self.assertEqual(res, "NewValidOwner")
+        self.assertEqual(self.env.get_player_username(), "NewValidOwner")
+
+    def test_installer_does_not_overwrite_valid_nickname_with_cliplayer(self):
+        """Установщик не перезаписывает валидный никнейм в player-data.json заглушкой CliPlayer."""
+        from src.installer.installer import FactorioWrapperInstaller
+
+        # Создаем имитацию портативной установки Factorio (user_data_dir == game_root)
+        game_root = self.temp_dir / "GameRoot"
+        bin_dir = game_root / "bin" / "x64"
+        bin_dir.mkdir(parents=True)
+        (bin_dir / "factorio.exe").write_bytes(b"MZ" + b"\x00" * 4096)
+        (game_root / "config-path.cfg").write_text("use-system-read-write-data-directories=false\n", encoding="utf-8")
+
+        # Создаем изолированное окружение игры в game_root
+        game_env = FactorioEnvironment(custom_game_root=game_root)
+        game_env.ensure_dirs()
+        # Пишем в окружение валидный ник игрока
+        game_env.set_player_username("graypikachu", force=True)
+
+        installer = FactorioWrapperInstaller()
+        # Вызываем установщик, передавая заглушку 'CliPlayer'
+        report = installer.install(
+            game_dir=game_root,
+            player_name="CliPlayer",
+            system_override="Windows",
+        )
+        self.assertEqual(report["player_name"], "graypikachu")
+        self.assertEqual(game_env.get_player_username(), "graypikachu")
+
+
 if __name__ == "__main__":
     unittest.main()

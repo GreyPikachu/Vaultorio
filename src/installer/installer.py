@@ -211,7 +211,7 @@ class FactorioWrapperInstaller:
     def install(
         self,
         game_dir: Path | str,
-        player_name: str,
+        player_name: Optional[str] = None,
         wrapper_binary_path: Optional[Path | str] = None,
         hub_url: Optional[str] = None,
         stun_host: Optional[str] = None,
@@ -226,7 +226,8 @@ class FactorioWrapperInstaller:
 
         Args:
             game_dir: Путь к корню игры Factorio.
-            player_name: Уникальный никнейм игрока.
+            player_name: Уникальный никнейм игрока (опционально; если не указан,
+                         разрешается существующий никнейм из профиля Factorio).
             wrapper_binary_path: Путь к собранному бинарнику перехватчика (опционально).
             hub_url: URL сервера-сейфа.
             stun_host: Хост STUN/P2P-координатора.
@@ -240,6 +241,25 @@ class FactorioWrapperInstaller:
         Returns:
             Отчет об установке.
         """
+        gdir = Path(game_dir).resolve()
+        if not gdir.is_dir():
+            raise FileNotFoundError(f"Каталог игры не найден: {gdir}")
+
+        # Валидация явно переданного никнейма (если передан)
+        if player_name is not None:
+            clean_input = str(player_name).strip()
+            if not clean_input:
+                raise ValueError("Никнейм игрока не может быть пустым.")
+            if clean_input.lower() in ("player", "игрок"):
+                raise ValueError(
+                    f"Недопустимый никнейм '{player_name}'. Укажите уникальный ник "
+                    f"(например: Alex, Dima), чтобы игра не путала сохранения и роли."
+                )
+
+        # Инициализируем окружение Factorio с учетом system_override
+        env = FactorioEnvironment(custom_game_root=gdir, system_override=system_override)
+        env.ensure_dirs()
+
         # Извлечение параметров из client_config, если передан
         if client_config is not None:
             hub_url = getattr(client_config, "hub_http_url", hub_url)
@@ -251,17 +271,13 @@ class FactorioWrapperInstaller:
             if cfg_pname and str(cfg_pname).strip():
                 player_name = str(cfg_pname).strip()
 
-        # Шаг 1: Валидация никнейма игрока
-        clean_name = str(player_name).strip()
+        # Шаг 1: Определение и сохранение никнейма игрока
+        # Если в player-data.json уже есть валидный никнейм, он никогда не перезаписывается!
+        clean_name = env.resolve_or_init_player_username(fallback_name=player_name)
         if not clean_name:
-            raise ValueError("Никнейм игрока не может быть пустым.")
-        if clean_name.lower() in ("player", "игрок"):
-            raise ValueError(
-                f"Недопустимый никнейм '{player_name}'. Укажите уникальный ник "
-                f"(например: Alex, Dima), чтобы игра не путала сохранения и роли."
-            )
+            raise ValueError("Не удалось определить никнейм игрока.")
+        logger.info(f"Используется никнейм игрока: '{clean_name}'")
 
-        gdir = Path(game_dir).resolve()
         paths = self.get_binary_paths(gdir, system_override=system_override)
         bin_dir = paths["bin_dir"]
         game_bin = paths["game_binary"]
@@ -322,10 +338,7 @@ class FactorioWrapperInstaller:
             os.chmod(game_bin, 0o755)
             logger.info(f"Перехватчик успешно установлен на место {game_bin.name}")
 
-        # Шаг 3: Настройка окружения Factorio и сетевых параметров
-        env = FactorioEnvironment(custom_game_root=gdir)
-        env.ensure_dirs()
-        env.set_player_username(clean_name)
+        # Шаг 3: Настройка окружения Factorio и сетевых параметров (без перезаписи ника)
         env.prepare_multiplayer_settings(
             is_host=False,
             proxy_address="127.0.0.1:34198",
@@ -591,20 +604,17 @@ def main(argv: Optional[List[str]] = None) -> int:
             clean_player = args.player_name
             cfg = None
 
+            temp_env = FactorioEnvironment(custom_game_root=game_path)
+            if not clean_player:
+                clean_player = temp_env.resolve_or_init_player_username()
+
             if args.invite_code and args.passphrase:
                 from src.client.hub_client import HubClient
-                if not clean_player:
-                    temp_env = FactorioEnvironment(custom_game_root=game_path)
-                    clean_player = temp_env.resolve_or_init_player_username()
                 cfg = HubClient.activate_with_invite_code(
                     invite_code=args.invite_code,
                     passphrase=args.passphrase,
                     player_name=clean_player,
                 )
-
-            if not clean_player:
-                print("ОШИБКА: Для установки требуется указать --player-name <имя> (или --invite-code и --passphrase).")
-                return 1
 
             res = installer.install(
                 game_dir=game_path,

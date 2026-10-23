@@ -23,6 +23,15 @@ from typing import Any
 
 logger = logging.getLogger("factorio_client.env")
 
+PLACEHOLDER_USERNAMES: set[str] = {
+    "player",
+    "игрок",
+    "cliplayer",
+    "engineer",
+    "testplayer",
+    "default",
+}
+
 
 class FactorioEnvironment:
     """Управление путями, конфигурацией и защитой файлов сохранения Factorio."""
@@ -32,6 +41,7 @@ class FactorioEnvironment:
         custom_game_root: Path | str | None = None,
         custom_user_data_dir: Path | str | None = None,
         cloud_save_name: str = "cloud_world.zip",
+        system_override: str | None = None,
     ) -> None:
         """Инициализирует окружение Factorio.
 
@@ -39,21 +49,24 @@ class FactorioEnvironment:
             custom_game_root: Явный путь к корню игры (если известен).
             custom_user_data_dir: Явный путь к пользовательским данным (saves, mods, config).
             cloud_save_name: Имя основного облачного файла сохранения.
+            system_override: Принудительное указание ОС для тестирования ('Windows', 'Darwin', 'Linux').
         """
         self.cloud_save_name = cloud_save_name
-        self._init_paths(custom_game_root, custom_user_data_dir)
+        self.system_override = system_override
+        self._init_paths(custom_game_root, custom_user_data_dir, system_override)
 
     def _init_paths(
         self,
         custom_game_root: Path | str | None,
         custom_user_data_dir: Path | str | None,
+        system_override: str | None = None,
     ) -> None:
         """Определяет пути к файлам и каталогам игры."""
         if custom_user_data_dir is not None:
             self.user_data_dir = Path(custom_user_data_dir).resolve()
             self.game_root = Path(custom_game_root).resolve() if custom_game_root else None
         else:
-            paths = self.detect_paths(executable_dir=custom_game_root)
+            paths = self.detect_paths(executable_dir=custom_game_root, system_override=system_override)
             self.game_root = paths.get("game_root")
             self.user_data_dir = paths["user_data_dir"]
 
@@ -63,6 +76,7 @@ class FactorioEnvironment:
         self.config_dir = self.user_data_dir / "config"
         self.config_ini_path = self.config_dir / "config.ini"
         self.player_data_path = self.user_data_dir / "player-data.json"
+        self.adminlist_path = self.user_data_dir / "server-adminlist.json"
         self.log_file_path = self.user_data_dir / "factorio-current.log"
 
     @property
@@ -331,15 +345,69 @@ class FactorioEnvironment:
             logger.error(f"Ошибка при записи {self.player_data_path}: {e}")
             raise
 
+    def _read_adminlist_username(self) -> str | None:
+        """Считывает валидный никнейм владельца из server-adminlist.json."""
+        if not hasattr(self, "adminlist_path") or not self.adminlist_path.is_file():
+            return None
+        try:
+            content = self.adminlist_path.read_text(encoding="utf-8")
+            if not content.strip():
+                return None
+            data = json.loads(content)
+            if isinstance(data, list):
+                for item in data:
+                    if isinstance(item, str) and item.strip():
+                        clean = item.strip()
+                        if clean.lower() not in PLACEHOLDER_USERNAMES and len(clean) >= 2:
+                            return clean
+            elif isinstance(data, dict):
+                admins = data.get("admins", [])
+                if isinstance(admins, list):
+                    for item in admins:
+                        if isinstance(item, str) and item.strip():
+                            clean = item.strip()
+                            if clean.lower() not in PLACEHOLDER_USERNAMES and len(clean) >= 2:
+                                return clean
+            return None
+        except Exception as e:
+            logger.debug(f"Не удалось прочитать {self.adminlist_path}: {e}")
+            return None
+
     def get_player_username(self) -> str | None:
-        """Возвращает никнейм игрока из player-data.json или config.ini."""
+        """Возвращает никнейм игрока из player-data.json, server-adminlist.json или config.ini.
+
+        Если в player-data.json обнаружена техническая заглушка (CliPlayer, Player, Engineer),
+        автоматически восстанавливает настоящий никнейм владельца из server-adminlist.json.
+        """
         try:
             data = self._read_player_data()
             name = data.get("service-username") or data.get("username")
             if name and isinstance(name, str) and name.strip():
-                return name.strip()
+                clean = name.strip()
+                if clean.lower() not in PLACEHOLDER_USERNAMES and len(clean) >= 2:
+                    return clean
 
-            # Fallback: проверка config.ini
+                # В player-data.json заглушка — проверяем server-adminlist.json
+                admin_name = self._read_adminlist_username()
+                if admin_name:
+                    logger.info(
+                        f"Обнаружена заглушка '{clean}' в player-data.json. "
+                        f"Восстанавливаем настоящий никнейм '{admin_name}' из server-adminlist.json."
+                    )
+                    self.set_player_username(admin_name, force=True)
+                    return admin_name
+
+                # Если в server-adminlist.json нет имени, возвращаем текущее имя из файла (например, 'Player')
+                return clean
+
+            # Fallback 1: проверка server-adminlist.json
+            admin_name = self._read_adminlist_username()
+            if admin_name:
+                logger.info(f"Найден никнейм в server-adminlist.json: '{admin_name}'")
+                self.set_player_username(admin_name, force=True)
+                return admin_name
+
+            # Fallback 2: проверка config.ini
             if self.config_ini_path.is_file():
                 for line in self.config_ini_path.read_text(
                     encoding="utf-8", errors="ignore"
@@ -348,7 +416,7 @@ class FactorioEnvironment:
                         "username="
                     ):
                         val = line.split("=", 1)[-1].strip()
-                        if val:
+                        if val and val.lower() not in PLACEHOLDER_USERNAMES and len(val) >= 2:
                             return val
 
             return None
@@ -356,15 +424,28 @@ class FactorioEnvironment:
             logger.warning(f"Ошибка при получении никнейма игрока: {e}")
             return None
 
-    def set_player_username(self, username: str) -> None:
+    def set_player_username(self, username: str, force: bool = True) -> str:
         """Устанавливает уникальный никнейм игрока в player-data.json.
 
         Args:
             username: Желаемый никнейм игрока.
+            force: Если False, проверяет текущий никнейм в player-data.json (и server-adminlist.json).
+                   Если там уже есть валидный никнейм (не placeholder), не перезаписывает его.
+
+        Returns:
+            Итоговый установленный или сохраненный никнейм.
         """
         clean_name = username.strip()
         if not clean_name:
             raise ValueError("Никнейм игрока не может быть пустым.")
+
+        if not force:
+            existing = self.get_player_username()
+            if existing and existing.lower() not in PLACEHOLDER_USERNAMES and len(existing) >= 2:
+                logger.info(
+                    f"Сохранение существующего ника '{existing}' (попытка перезаписи на '{clean_name}' отклонена, force=False)"
+                )
+                return existing
 
         try:
             data = self._read_player_data()
@@ -372,6 +453,7 @@ class FactorioEnvironment:
             data["username"] = clean_name
             self._write_player_data(data)
             logger.info(f"Установлен никнейм игрока: '{clean_name}'")
+            return clean_name
         except Exception as e:
             logger.error(f"Не удалось установить никнейм '{username}': {e}")
             raise
@@ -380,14 +462,15 @@ class FactorioEnvironment:
         """Определяет актуальный никнейм игрока либо инициализирует его.
 
         Алгоритм:
-        1. Читает никнейм из player-data.json / config.ini.
-        2. Если имя задано, не пустое, не равно дефолтному 'Player' и длина >= 2 символов — возвращает его.
-        3. Если имя отсутствует или равно 'Player':
-           - Использует fallback_name (если он валиден и != 'Player').
+        1. Читает никнейм через get_player_username() (из player-data.json, server-adminlist.json или config.ini).
+        2. Если имя задано, не пустое, не входит в PLACEHOLDER_USERNAMES и длина >= 2 символов — возвращает его.
+           В этом случае переданный fallback_name ИГНОРИРУЕТСЯ, чтобы не затирать существующий профиль игрока.
+        3. Если валидное имя отсутствует или является заглушкой:
+           - Проверяет fallback_name (если он валиден и не в PLACEHOLDER_USERNAMES).
            - Иначе вычисляет имя учетной записи ОС (getpass.getuser() / Path.home().name),
-             очищает от спецсимволов. Если результат пустой или равен 'Player' — использует 'Engineer'.
-        4. Автоматически сохраняет вычисленное имя в player-data.json, чтобы игра и сервер
-           использовали единый валидный никнейм.
+             очищает от спецсимволов. Если результат пустой или в PLACEHOLDER_USERNAMES — использует 'Engineer'.
+        4. Автоматически сохраняет вычисленное имя в player-data.json через set_player_username(force=True),
+           чтобы игра и сервер использовали единый валидный никнейм.
 
         Args:
             fallback_name: Опциональный резервный никнейм.
@@ -396,12 +479,22 @@ class FactorioEnvironment:
             Валидный никнейм игрока.
         """
         current_name = self.get_player_username()
-        if current_name and current_name.strip() and current_name.strip().lower() != "player" and len(current_name.strip()) >= 2:
+        if (
+            current_name
+            and current_name.strip()
+            and current_name.strip().lower() not in PLACEHOLDER_USERNAMES
+            and len(current_name.strip()) >= 2
+        ):
             return current_name.strip()
 
         # Проверяем fallback_name
         chosen_name: str | None = None
-        if fallback_name and fallback_name.strip() and fallback_name.strip().lower() != "player" and len(fallback_name.strip()) >= 2:
+        if (
+            fallback_name
+            and fallback_name.strip()
+            and fallback_name.strip().lower() not in PLACEHOLDER_USERNAMES
+            and len(fallback_name.strip()) >= 2
+        ):
             chosen_name = fallback_name.strip()
 
         # Если fallback не подошел, берем имя пользователя ОС
@@ -412,13 +505,17 @@ class FactorioEnvironment:
                 os_user = Path.home().name
 
             clean_os_user = re.sub(r"[^a-zA-Z0-9_\-]", "", os_user or "").strip()
-            if clean_os_user and clean_os_user.lower() != "player" and len(clean_os_user) >= 2:
+            if (
+                clean_os_user
+                and clean_os_user.lower() not in PLACEHOLDER_USERNAMES
+                and len(clean_os_user) >= 2
+            ):
                 chosen_name = clean_os_user
             else:
                 chosen_name = "Engineer"
 
         try:
-            self.set_player_username(chosen_name)
+            self.set_player_username(chosen_name, force=True)
         except Exception as err:
             logger.warning(f"Не удалось автоматически записать никнейм '{chosen_name}' в player-data.json: {err}")
 
