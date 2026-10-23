@@ -53,6 +53,7 @@ class MockFactorioCore:
         factorio_port: int = 34197,
         guest_proxy_port: int = 34198,
         generate_autosaves: int = 1,
+        map_name: str = "cloud_world.zip",
     ) -> None:
         self.mode = mode.lower()
         self.user_data_dir = Path(user_data_dir).resolve() if user_data_dir else Path.cwd()
@@ -60,6 +61,7 @@ class MockFactorioCore:
         self.factorio_port = int(factorio_port)
         self.guest_proxy_port = int(guest_proxy_port)
         self.generate_autosaves = int(generate_autosaves)
+        self.map_name = str(map_name)
 
         self.saves_dir = self.user_data_dir / "saves"
         self.log_file = self.user_data_dir / "factorio-current.log"
@@ -76,6 +78,8 @@ class MockFactorioCore:
             return self._run_guest_mode()
         elif self.mode == "idle_menu":
             return self._run_idle_menu_mode()
+        elif self.mode == "singleplayer":
+            return self._run_singleplayer_mode()
         else:
             logger.error(f"Неизвестный режим работы: '{self.mode}'")
             return 1
@@ -83,9 +87,11 @@ class MockFactorioCore:
     def _run_host_mode(self) -> int:
         """Поведение Хоста: лог хостинга, сокет 34197, генерация _autosave1.zip."""
         # 1. Запись в лог factorio-current.log
+        save_path = self.saves_dir / self.map_name
         startup_log = (
             "   0.000 2026-10-23 00:00:00; Factorio 2.0.0 (build 0, macOS, non-steam)\n"
             "   0.001 Operating system: macOS\n"
+            f"   0.020 Loading map {save_path}: 12345678 bytes.\n"
             f"   0.050 Hosting game at 0.0.0.0:{self.factorio_port}\n"
         )
         self.log_file.write_text(startup_log, encoding="utf-8")
@@ -185,20 +191,42 @@ class MockFactorioCore:
         logger.info("Игрок закрыл главное меню Factorio.")
         return 0
 
+    def _run_singleplayer_mode(self) -> int:
+        """Поведение одиночной игры: лог загрузки карты, генерация _autosave1.zip (без сетевого сокета)."""
+        save_path = self.saves_dir / self.map_name
+        startup_log = (
+            "   0.000 2026-10-23 00:00:00; Factorio 2.0.0 (build 0, macOS, non-steam)\n"
+            "   0.001 Operating system: macOS\n"
+            f"   0.020 Loading map {save_path}: 12345678 bytes.\n"
+            "   0.500 Singleplayer game active.\n"
+        )
+        self.log_file.write_text(startup_log, encoding="utf-8")
+        logger.info(f"Лог одиночной игры записан в {self.log_file} (карта: {self.map_name})")
+
+        # Генерация периодических автосейвов
+        autosave_file = self.saves_dir / "_autosave1.zip"
+        create_dummy_save(autosave_file, "singleplayer_autosave_content_1")
+        logger.info(f"Сгенерирован файл автосохранения одиночной игры: {autosave_file}")
+
+        time.sleep(self.duration_sec)
+        logger.info("Сессия одиночной игры Factorio завершена.")
+        return 0
+
 
 def main(argv: Optional[List[str]] = None) -> int:
     """Точка входа mock_factorio_core."""
     parser = argparse.ArgumentParser(description="Mock Factorio Core Engine")
     parser.add_argument(
         "--mode",
-        choices=["host", "guest", "idle_menu"],
+        choices=["host", "guest", "idle_menu", "singleplayer"],
         default="host",
-        help="Режим имитации (host, guest или idle_menu)",
+        help="Режим имитации (host, guest, idle_menu или singleplayer)",
     )
     parser.add_argument("--user-data-dir", type=str, default=None, help="Каталог пользовательских данных Factorio")
     parser.add_argument("--duration", type=float, default=0.5, help="Время работы процесса в секундах")
     parser.add_argument("--port", type=int, default=34197, help="Порт игрового сервера")
     parser.add_argument("--proxy-port", type=int, default=34198, help="Порт прокси Гостя")
+    parser.add_argument("--map-name", type=str, default="cloud_world.zip", help="Имя загружаемого файла сохранения")
 
     known, _ = parser.parse_known_args(argv)
 
@@ -208,6 +236,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         duration_sec=known.duration,
         factorio_port=known.port,
         guest_proxy_port=known.proxy_port,
+        map_name=known.map_name,
     )
     return core.run()
 

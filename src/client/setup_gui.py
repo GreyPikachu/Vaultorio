@@ -29,8 +29,9 @@ DEFAULT_SERVER_WORLD_OPTION = "Оставить текущий мир серве
 def publish_selected_world_to_server(
     env: FactorioEnvironment,
     hub_client: HubClient,
-    source_save_path: Path | str,
-    player_name: str,
+    source_save_path: Optional[Path | str] = None,
+    player_name: str = "Player",
+    save_path: Optional[Path | str] = None,
 ) -> dict[str, Any]:
     """Публикует выбранный локальный мир на сервер в качестве нового cloud_world.zip.
 
@@ -44,7 +45,11 @@ def publish_selected_world_to_server(
     Returns:
         Словарь с отчетом о публикации мира.
     """
-    path = Path(source_save_path).resolve()
+    target_src = source_save_path if source_save_path is not None else save_path
+    if target_src is None:
+        raise ValueError("Не указан путь к файлу сохранения для публикации (source_save_path).")
+
+    path = Path(target_src).resolve()
     if not path.is_file():
         raise FileNotFoundError(f"Файл сохранения '{path.name}' не найден.")
     if not zipfile.is_zipfile(path):
