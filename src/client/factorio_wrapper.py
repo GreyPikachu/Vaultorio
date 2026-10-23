@@ -99,6 +99,11 @@ def parse_wrapper_args(argv: List[str]) -> Tuple[argparse.Namespace, List[str]]:
     parser.add_argument("--wrapper-hub-url", type=str, default=None, help="URL сервера-сейфа")
     parser.add_argument("--wrapper-player-name", type=str, default=None, help="Никнейм игрока")
     parser.add_argument(
+        "--wrapper-setup",
+        action="store_true",
+        help="Принудительно открыть окно настроек и выбора мира перед запуском",
+    )
+    parser.add_argument(
         "--wrapper-help",
         action="store_true",
         help="Показать справку перехватчика",
@@ -158,6 +163,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         env=env,
         custom_core_bin=wrapper_args.wrapper_core_bin,
         config_path=config_path,
+        force_setup_gui=wrapper_args.wrapper_setup,
     )
 
     try:

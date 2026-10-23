@@ -34,6 +34,7 @@ from src.client.factorio_env import FactorioEnvironment
 from src.client.host_workers import HostWorkersManager
 from src.client.hub_client import HubClient
 from src.client.p2p_tunnel import GuestP2PProxy, HostP2PBridge
+from src.client.shift_detector import is_shift_key_pressed
 from src.client.ui_notifier import copy_to_clipboard, show_role_banner
 
 logger = logging.getLogger("factorio_client.orchestrator")
@@ -173,10 +174,14 @@ class SessionOrchestrator:
         custom_core_bin: Optional[Path | str] = None,
         config_path: Optional[Path | str] = None,
         setup_gui_provider: Optional[Callable[..., Optional[ClientConfig]]] = None,
+        force_setup_gui: bool = False,
+        shift_detector: Optional[Callable[[], bool]] = None,
     ) -> None:
         self.env = env or FactorioEnvironment()
         self.config_path = Path(config_path).resolve() if config_path else self.env.sync_config_path
         self.setup_gui_provider = setup_gui_provider
+        self.force_setup_gui = bool(force_setup_gui)
+        self.shift_detector = shift_detector
 
         if config is not None:
             self.config = config
@@ -298,9 +303,21 @@ class SessionOrchestrator:
              копирует 127.0.0.1:34198 в буфер обмена и запускает GuestP2PProxy + GuestHandoverWatcher.
         """
         with self._lock:
-            # Шаг 0: Первичная настройка через GUI, если конфигурация не завершена
-            if not self.config.is_configured():
-                logger.info("Клиент еще не настроен (отсутствует device_token). Запуск GUI первого запуска...")
+            # Шаг 0: Первичная настройка через GUI или вызов по Shift / force_setup_gui
+            is_shift = (
+                self.shift_detector()
+                if self.shift_detector is not None
+                else is_shift_key_pressed()
+            )
+            should_run_setup = (not self.config.is_configured()) or self.force_setup_gui or is_shift
+
+            if should_run_setup:
+                reason_log = (
+                    "отсутствует device_token"
+                    if not self.config.is_configured()
+                    else ("флаг force_setup_gui" if self.force_setup_gui else "зажата клавиша Shift")
+                )
+                logger.info(f"Запуск окна настроек GUI ({reason_log})...")
                 gui_runner = self.setup_gui_provider
                 if gui_runner is None:
                     try:
@@ -316,6 +333,7 @@ class SessionOrchestrator:
                             config_path=self.config_path,
                             installer_mode=False,
                             http_client=getattr(self.hub_client, "_client", None),
+                            existing_config=self.config,
                         )
                         if new_config and new_config.is_configured():
                             self.config = new_config
@@ -325,27 +343,33 @@ class SessionOrchestrator:
                                 except Exception:
                                     pass
                                 self.hub_client = HubClient(config=self.config)
-                            logger.info("Первичная настройка через GUI успешно завершена.")
+                            logger.info("Настройка через GUI успешно завершена.")
                         else:
-                            logger.warning(
-                                "Первичная настройка через GUI отменена пользователем. "
-                                "Переход в автономный режим (OFFLINE)."
-                            )
+                            if not self.config.is_configured():
+                                logger.warning(
+                                    "Первичная настройка через GUI отменена пользователем. "
+                                    "Переход в автономный режим (OFFLINE)."
+                                )
+                                self.role = RoleType.OFFLINE
+                                self.is_prepared = True
+                                return {
+                                    "role": self.role,
+                                    "reason": "setup_cancelled_by_user",
+                                }
+                            else:
+                                logger.info(
+                                    "Окно настроек закрыто, продолжаем запуск с текущей конфигурацией."
+                                )
+                    except Exception as gui_err:
+                        logger.warning(f"Ошибка при вызове GUI настройки: {gui_err}")
+                        if not self.config.is_configured():
                             self.role = RoleType.OFFLINE
                             self.is_prepared = True
                             return {
                                 "role": self.role,
-                                "reason": "setup_cancelled_by_user",
+                                "reason": "setup_gui_failed",
+                                "error": str(gui_err),
                             }
-                    except Exception as gui_err:
-                        logger.warning(f"Ошибка при вызове GUI первого запуска: {gui_err}")
-                        self.role = RoleType.OFFLINE
-                        self.is_prepared = True
-                        return {
-                            "role": self.role,
-                            "reason": "setup_gui_failed",
-                            "error": str(gui_err),
-                        }
 
             # Шаг 1: Обеспечение директорий и восстановление от возможных прошлых сбоев
             self.env.ensure_dirs()

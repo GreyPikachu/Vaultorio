@@ -10,7 +10,10 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
 import threading
+import time
+import zipfile
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -19,6 +22,104 @@ from src.client.factorio_env import FactorioEnvironment
 from src.client.hub_client import HubClient
 
 logger = logging.getLogger("factorio_client.setup_gui")
+
+DEFAULT_SERVER_WORLD_OPTION = "Оставить текущий мир сервера (cloud_world.zip)"
+
+
+def publish_selected_world_to_server(
+    env: FactorioEnvironment,
+    hub_client: HubClient,
+    source_save_path: Path | str,
+    player_name: str,
+) -> dict[str, Any]:
+    """Публикует выбранный локальный мир на сервер в качестве нового cloud_world.zip.
+
+    1. Валидирует source_save_path (существование, валидный ZIP).
+    2. Проверяет статус сервера (GET /status): если сервер занят (не idle), выбрасывает RuntimeError.
+    3. Создает резервную копию текущего локального cloud_world.zip в cloud_world_prev_local.zip (если есть).
+    4. Атомарно копирует source_save_path в saves/cloud_world.zip.
+    5. Захватывает роль Хоста (claim_host).
+    6. Выгружает новый cloud_world.zip на VPS с release_on_success=True.
+
+    Returns:
+        Словарь с отчетом о публикации мира.
+    """
+    path = Path(source_save_path).resolve()
+    if not path.is_file():
+        raise FileNotFoundError(f"Файл сохранения '{path.name}' не найден.")
+    if not zipfile.is_zipfile(path):
+        raise ValueError(f"Файл '{path.name}' поврежден или не является ZIP-архивом.")
+
+    status = hub_client.get_status()
+    state = status.get("state") or status.get("session", {}).get("state", "idle")
+    if state != "idle":
+        current_host = (
+            status.get("current_host")
+            or status.get("session", {}).get("host_name")
+            or "другим игроком"
+        )
+        raise RuntimeError(
+            f"Сейчас на сервере играет {current_host}. Сменить мир можно только когда сервер свободен."
+        )
+
+    canonical_save = env.saves_dir / env.cloud_save_name
+    env.saves_dir.mkdir(parents=True, exist_ok=True)
+
+    # Если исходный файл не является самим cloud_world.zip
+    if path.resolve() != canonical_save.resolve():
+        if canonical_save.exists():
+            backup_save = env.saves_dir / f"{canonical_save.stem}_prev_local.zip"
+            try:
+                shutil.copy2(canonical_save, backup_save)
+                logger.info(f"Создана резервная копия старого мира: {backup_save.name}")
+            except Exception as b_err:
+                logger.warning(f"Не удалось создать резервную копию {canonical_save.name}: {b_err}")
+
+        # Атомарно обновляем saves/cloud_world.zip
+        temp_target = env.saves_dir / f"{canonical_save.stem}_new_{int(time.time())}.tmp"
+        try:
+            shutil.copy2(path, temp_target)
+            os.replace(temp_target, canonical_save)
+            logger.info(f"Файл {path.name} скопирован в {canonical_save.name}")
+        except Exception as copy_err:
+            if temp_target.exists():
+                try:
+                    temp_target.unlink()
+                except OSError:
+                    pass
+            raise RuntimeError(f"Ошибка копирования мира в {canonical_save.name}: {copy_err}")
+
+    # Захватываем роль Хоста для выгрузки
+    claim_res = hub_client.claim_host(player_name=player_name, wait_for_upload=True)
+    if not claim_res.get("claimed"):
+        reason = claim_res.get("reason", "сервер отклонил запрос")
+        raise RuntimeError(f"Не удалось занять слот Хоста для публикации мира ({reason}).")
+
+    session_token = str(claim_res.get("session_token", ""))
+    if not session_token:
+        raise RuntimeError("Сервер не вернул session_token при захвате слота.")
+
+    try:
+        upload_res = hub_client.upload_save(
+            file_path=canonical_save,
+            session_token=session_token,
+            release_on_success=True,
+            mod_list=env.get_active_mods_manifest(),
+        )
+        logger.info(f"Мир {path.name} успешно выгружен на сервер как {env.cloud_save_name}: {upload_res}")
+        return {
+            "published": True,
+            "source_save": str(path),
+            "cloud_save": str(canonical_save),
+            "upload_result": upload_res,
+        }
+    except Exception as up_err:
+        logger.error(f"Ошибка выгрузки нового мира на сервер: {up_err}")
+        try:
+            hub_client.release_host(session_token, reason="publish_failed")
+        except Exception:
+            pass
+        raise
 
 # Цветовая палитра Factorio Dark Industrial
 COLOR_BG = "#1f2124"
@@ -52,6 +153,7 @@ class FirstRunSetupWindow:
         on_install_callback: Optional[Callable[[Path, str, ClientConfig], None]] = None,
         on_uninstall_callback: Optional[Callable[[Path], Any]] = None,
         prompt_message: Optional[str] = None,
+        existing_config: Optional[ClientConfig] = None,
     ) -> None:
         """Инициализирует окно настройки.
 
@@ -64,6 +166,7 @@ class FirstRunSetupWindow:
             on_install_callback: Callback установки перехватчика в installer_mode.
             on_uninstall_callback: Callback удаления перехватчика в installer_mode.
             prompt_message: Дополнительное пояснительное сообщение в шапке окна.
+            existing_config: Уже существующая конфигурация клиента (при открытии по Shift).
         """
         import tkinter as tk
         from tkinter import ttk
@@ -79,6 +182,8 @@ class FirstRunSetupWindow:
         self.on_install_callback = on_install_callback
         self.on_uninstall_callback = on_uninstall_callback
         self.prompt_message = prompt_message
+        self.existing_config = existing_config
+        self.is_already_configured = bool(self.existing_config and self.existing_config.is_configured())
 
         self.result_config: Optional[ClientConfig] = None
         self.is_activating = False
@@ -103,7 +208,7 @@ class FirstRunSetupWindow:
         self.root.resizable(False, False)
 
         width = 540
-        height = 580 if self.installer_mode else 480
+        height = 640 if self.installer_mode else 540
         if self.prompt_message:
             height += 40
 
@@ -120,6 +225,7 @@ class FirstRunSetupWindow:
     def _build_ui(self) -> None:
         """Создает и размещает элементы пользовательского интерфейса."""
         tk = self.tk
+        ttk = self.ttk
 
         main_container = tk.Frame(self.root, bg=COLOR_BG, padx=20, pady=16)
         main_container.pack(fill=tk.BOTH, expand=True)
@@ -197,7 +303,56 @@ class FirstRunSetupWindow:
         )
         player_sub_lbl.pack(anchor="w", pady=(2, 0))
 
-        # 3. Режим установщика: путь к игре
+        # 3. Секция выбора активного мира сервера
+        world_card = tk.Frame(
+            main_container,
+            bg=COLOR_CARD,
+            relief=tk.SOLID,
+            bd=1,
+            padx=12,
+            pady=8,
+        )
+        world_card.pack(fill=tk.X, pady=(0, 10))
+
+        world_title_lbl = tk.Label(
+            world_card,
+            text="Активный мир на сервере (синхронизируется только он):",
+            font=("Helvetica", 9, "bold"),
+            fg=COLOR_TEXT,
+            bg=COLOR_CARD,
+        )
+        world_title_lbl.pack(anchor="w")
+
+        local_saves = []
+        try:
+            local_saves = self.env.list_local_saves(include_cloud_world=False)
+        except Exception as err:
+            logger.warning(f"Ошибка получения списка сохранений: {err}")
+
+        self.world_options = [DEFAULT_SERVER_WORLD_OPTION] + [s.name for s in local_saves]
+        self.world_combo_var = tk.StringVar(value=DEFAULT_SERVER_WORLD_OPTION)
+
+        self.world_combo = ttk.Combobox(
+            world_card,
+            textvariable=self.world_combo_var,
+            values=self.world_options,
+            state="readonly",
+            font=("Helvetica", 9),
+        )
+        self.world_combo.pack(fill=tk.X, pady=(4, 4))
+
+        world_hint_lbl = tk.Label(
+            world_card,
+            text="Если в игре вы запустите любой другой мир, он останется чисто локальным и не затронет сервер",
+            font=("Helvetica", 8),
+            fg=COLOR_TEXT_MUTED,
+            bg=COLOR_CARD,
+            wraplength=480,
+            justify="left",
+        )
+        world_hint_lbl.pack(anchor="w")
+
+        # 4. Режим установщика: путь к игре
         if self.installer_mode:
             game_card = tk.Frame(
                 main_container,
@@ -250,7 +405,7 @@ class FirstRunSetupWindow:
             )
             browse_btn.pack(side=tk.RIGHT)
 
-        # 4. Блок ввода Кода Дружбы и секретного слова
+        # 5. Блок ввода Кода Дружбы и секретного слова
         inputs_card = tk.Frame(
             main_container,
             bg=COLOR_CARD,
@@ -262,9 +417,14 @@ class FirstRunSetupWindow:
         inputs_card.pack(fill=tk.X, pady=(0, 10))
 
         # Поле 1: Одноразовый Код Дружбы
+        code_title = (
+            "Код Дружбы (оставьте пустым для сохранения текущего сервера):"
+            if self.is_already_configured
+            else "Одноразовый Код Дружбы (FCT1-...):"
+        )
         code_lbl = tk.Label(
             inputs_card,
-            text="Одноразовый Код Дружбы (FCT1-...):",
+            text=code_title,
             font=("Helvetica", 9, "bold"),
             fg=COLOR_TEXT,
             bg=COLOR_CARD,
@@ -303,9 +463,14 @@ class FirstRunSetupWindow:
         paste_btn.pack(side=tk.RIGHT)
 
         # Поле 2: Секретное слово
+        pass_title = (
+            "Секретное слово (оставьте пустым для сохранения текущего сервера):"
+            if self.is_already_configured
+            else "Секретное слово (пароль инвайта):"
+        )
         pass_lbl = tk.Label(
             inputs_card,
-            text="Секретное слово (пароль инвайта):",
+            text=pass_title,
             font=("Helvetica", 9, "bold"),
             fg=COLOR_TEXT,
             bg=COLOR_CARD,
@@ -345,8 +510,13 @@ class FirstRunSetupWindow:
         )
         self.toggle_pass_btn.pack(side=tk.RIGHT)
 
-        # 5. Строка состояния (Status Bar)
-        self.status_var = tk.StringVar(value="Введите полученный Код Дружбы и секретное слово")
+        # 6. Строка состояния (Status Bar)
+        initial_status = (
+            "Сервер уже подключен. Выберите мир и нажмите «Применить и запустить»."
+            if self.is_already_configured
+            else "Введите полученный Код Дружбы и секретное слово"
+        )
+        self.status_var = tk.StringVar(value=initial_status)
         self.status_lbl = tk.Label(
             main_container,
             textvariable=self.status_var,
@@ -358,11 +528,17 @@ class FirstRunSetupWindow:
         )
         self.status_lbl.pack(fill=tk.X, pady=(4, 10))
 
-        # 6. Кнопки действий
+        # 7. Кнопки действий
         btn_frame = tk.Frame(main_container, bg=COLOR_BG)
         btn_frame.pack(fill=tk.X, side=tk.BOTTOM)
 
-        action_text = "Установить и подключить" if self.installer_mode else "Подключить и продолжить"
+        if self.installer_mode:
+            action_text = "Установить и подключить"
+        elif self.is_already_configured:
+            action_text = "Применить и запустить игру"
+        else:
+            action_text = "Подключить и продолжить"
+
         self.action_btn = tk.Button(
             btn_frame,
             text=action_text,
@@ -486,12 +662,36 @@ class FirstRunSetupWindow:
                 self.set_status(f"Ошибка удаления: {e}", color=COLOR_ERROR)
 
     def _on_activate_click(self) -> None:
-        """Валидирует ввод и запускает фоновую активацию билета."""
+        """Валидирует ввод и запускает фоновую активацию или смену мира."""
         if self.is_activating:
             return
 
         code = self.code_var.get().strip()
         passphrase = self.pass_var.get().strip()
+        selected_world = self.world_combo_var.get().strip()
+
+        # Если клиент уже настроен и пользователь не вводил новый код
+        if self.is_already_configured and not code and not passphrase:
+            if selected_world == DEFAULT_SERVER_WORLD_OPTION:
+                # Ничего менять не нужно, просто запускаем игру
+                self.result_config = self.existing_config
+                self.set_status("Настройки сохранены. Запуск игры...", color=COLOR_SUCCESS)
+                self.root.after(300, self.root.destroy)
+                return
+
+            # Пользователь выбрал другой локальный мир для публикации на сервер
+            self.is_activating = True
+            self.action_btn.config(state="disabled")
+            self.set_status(f"Публикация мира '{selected_world}' на сервер...", color=COLOR_INFO)
+
+            worker = threading.Thread(
+                target=self._publish_world_worker,
+                args=(selected_world, self.existing_config),
+                daemon=True,
+                name="WorldPublishThread",
+            )
+            worker.start()
+            return
 
         if not code:
             self.set_status("Пожалуйста, введите Код Дружбы", color=COLOR_ERROR)
@@ -519,13 +719,42 @@ class FirstRunSetupWindow:
         # Фоновый рабочий поток
         worker = threading.Thread(
             target=self._activate_worker,
-            args=(code, passphrase),
+            args=(code, passphrase, selected_world),
             daemon=True,
             name="FirstRunActivationThread",
         )
         worker.start()
 
-    def _activate_worker(self, code: str, passphrase: str) -> None:
+    def _publish_world_worker(self, save_name: str, cfg: Optional[ClientConfig]) -> None:
+        """Публикует выбранный мир на сервер в фоновом потоке."""
+        try:
+            if not cfg:
+                raise ValueError("Конфигурация клиента отсутствует.")
+            hub_client = HubClient(config=cfg, http_client=self.http_client)
+            save_path = self.env.saves_dir / save_name
+            publish_selected_world_to_server(
+                env=self.env,
+                hub_client=hub_client,
+                source_save_path=save_path,
+                player_name=self.player_name,
+            )
+            self.result_config = cfg
+            self.root.after(0, self._on_publish_success)
+        except Exception as exc:
+            logger.warning(f"Ошибка при публикации выбранного мира: {exc}")
+            self.root.after(0, lambda: self._on_activation_error(exc))
+
+    def _on_publish_success(self) -> None:
+        """Обрабатывает успешную публикацию мира."""
+        self.set_status("Мир успешно опубликован на сервер! Запуск игры...", color=COLOR_SUCCESS)
+        self.root.after(600, self.root.destroy)
+
+    def _activate_worker(
+        self,
+        code: str,
+        passphrase: str,
+        selected_world: str = DEFAULT_SERVER_WORLD_OPTION,
+    ) -> None:
         """Выполняет сетевой запрос активации в фоновом потоке."""
         try:
             cfg = HubClient.activate_with_invite_code(
@@ -539,6 +768,21 @@ class FirstRunSetupWindow:
             # Если передан callback установщика
             if self.installer_mode and self.on_install_callback and self.game_path:
                 self.on_install_callback(self.game_path, self.player_name, cfg)
+
+            # Если при первичной настройке пользователь выбрал локальный мир для загрузки
+            if selected_world and selected_world != DEFAULT_SERVER_WORLD_OPTION:
+                save_path = self.env.saves_dir / selected_world
+                if save_path.is_file():
+                    try:
+                        hub_client = HubClient(config=cfg, http_client=self.http_client)
+                        publish_selected_world_to_server(
+                            env=self.env,
+                            hub_client=hub_client,
+                            source_save_path=save_path,
+                            player_name=self.player_name,
+                        )
+                    except Exception as pub_err:
+                        logger.warning(f"Мир не удалось опубликовать сразу при активации: {pub_err}")
 
             self.result_config = cfg
             self.root.after(0, self._on_activation_success)
@@ -565,6 +809,8 @@ class FirstRunSetupWindow:
             msg = "Ошибка: Неверное секретное слово или поврежденный Код Дружбы."
         elif "ConnectError" in err_str or "ConnectionRefused" in err_str or "timeout" in err_str:
             msg = "Ошибка сети: Сервер-сейф недоступен. Проверьте интернет-соединение."
+        elif "Сейчас на сервере играет" in err_str:
+            msg = err_str
         else:
             msg = f"Ошибка подключения: {err_str}"
 
@@ -579,6 +825,7 @@ def run_first_time_setup_gui(
     on_install_callback: Optional[Callable[[Path, str, ClientConfig], None]] = None,
     on_uninstall_callback: Optional[Callable[[Path], Any]] = None,
     prompt_message: Optional[str] = None,
+    existing_config: Optional[ClientConfig] = None,
 ) -> Optional[ClientConfig]:
     """Безопасно запускает графическое окно первичной настройки.
 
@@ -594,6 +841,7 @@ def run_first_time_setup_gui(
         on_install_callback: Callback для установки перехватчика.
         on_uninstall_callback: Callback для деинсталляции.
         prompt_message: Текст информационного баннера в окне.
+        existing_config: Уже существующая конфигурация (при повторном открытии по Shift).
 
     Returns:
         Экземпляр сконфигурированного ClientConfig, либо None если окно закрыто
@@ -619,7 +867,7 @@ def run_first_time_setup_gui(
         import tkinter as tk
     except ImportError as imp_err:
         logger.warning(f"Пакет tkinter недоступен в текущем Python: {imp_err}. Пропуск GUI.")
-        return None
+        return existing_config if (existing_config and existing_config.is_configured()) else None
 
     try:
         root = tk.Tk()
@@ -628,7 +876,7 @@ def run_first_time_setup_gui(
             f"Графический дисплей недоступен ({tcl_err}). "
             f"Пропуск GUI-окна первого запуска."
         )
-        return None
+        return existing_config if (existing_config and existing_config.is_configured()) else None
 
     try:
         app = FirstRunSetupWindow(
@@ -640,6 +888,7 @@ def run_first_time_setup_gui(
             on_install_callback=on_install_callback,
             on_uninstall_callback=on_uninstall_callback,
             prompt_message=prompt_message,
+            existing_config=existing_config,
         )
         root.mainloop()
         return app.result_config
@@ -649,4 +898,4 @@ def run_first_time_setup_gui(
             root.destroy()
         except Exception:
             pass
-        return None
+        return existing_config if (existing_config and existing_config.is_configured()) else None

@@ -12,7 +12,7 @@ import os
 import platform
 import subprocess
 import threading
-from typing import Optional
+from typing import Any, Optional
 
 logger = logging.getLogger("factorio_client.notifier")
 
@@ -149,6 +149,8 @@ def show_role_banner(
     host_name: Optional[str] = None,
     extra_message: Optional[str] = None,
     background: bool = True,
+    duration_sec: Optional[float] = None,
+    **kwargs: Any,
 ) -> str:
     """Отображает подсказку о текущей роли игрока в игре.
 
@@ -162,6 +164,8 @@ def show_role_banner(
         host_name: Имя текущего Хоста (для роли Гостя).
         extra_message: Дополнительное пояснение (например, статус синхронизации).
         background: Выполнять ли показ в неблокирующем фоновом потоке (по умолчанию True).
+        duration_sec: Длительность показа уведомления в секундах (для совместимости).
+        **kwargs: Дополнительные параметры.
 
     Returns:
         Сформированный текст уведомления.

@@ -256,6 +256,53 @@ class FactorioEnvironment:
             logger.error(f"Ошибка при восстановлении скрытого сейва {target_name}: {e}")
             raise
 
+    def list_local_saves(self, include_cloud_world: bool = False) -> list[Path]:
+        """Возвращает список пользовательских сохранений (*.zip) из папки saves/.
+
+        Фильтрует:
+        - файлы, не являющиеся .zip;
+        - скрытые файлы (начинающиеся с точки);
+        - файлы автосейвов (начинающиеся с _autosave);
+        - временные файлы (.tmp, .part);
+        - сам cloud_world.zip (если include_cloud_world=False).
+
+        Сортирует результаты по st_mtime по убыванию (самые свежие сохранения первыми).
+        """
+        if not self.saves_dir.is_dir():
+            return []
+
+        results: list[tuple[float, Path]] = []
+        cloud_name_lower = self.cloud_save_name.lower()
+
+        try:
+            for entry in self.saves_dir.iterdir():
+                if not entry.is_file():
+                    continue
+                name_lower = entry.name.lower()
+                if not name_lower.endswith(".zip"):
+                    continue
+                if name_lower.startswith("."):
+                    continue
+                if name_lower.startswith("_autosave"):
+                    continue
+                if ".tmp" in name_lower or name_lower.endswith(".part"):
+                    continue
+                if not include_cloud_world and name_lower == cloud_name_lower:
+                    continue
+
+                try:
+                    stat = entry.stat()
+                    if stat.st_size > 0:
+                        results.append((stat.st_mtime, entry))
+                except OSError:
+                    continue
+        except Exception as err:
+            logger.warning(f"Ошибка при сканировании локальных сохранений в {self.saves_dir}: {err}")
+            return []
+
+        results.sort(key=lambda item: item[0], reverse=True)
+        return [item[1] for item in results]
+
     # =========================================================================
     # Раздел 3: Идентификация игрока (player-data.json)
     # =========================================================================
