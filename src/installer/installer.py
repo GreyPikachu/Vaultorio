@@ -384,11 +384,14 @@ class FactorioWrapperInstaller:
             # В качестве заглушки копируем ядро
             shutil.copy2(core_bin, target_bin)
         else:
-            # Для macOS/Linux создаем шелл-скрипт
+            # Для macOS/Linux создаем шелл-скрипт запуска перехватчика
+            python_bin = sys.executable
+            project_root = Path(__file__).resolve().parent.parent.parent
             target_bin.write_text(
-                f"#!/bin/sh\n"
+                f"#!/bin/bash\n"
                 f"# Factorio P2P Cloud Sync Wrapper\n"
-                f'exec "{core_bin}" "$@"\n',
+                f'export PYTHONPATH="{project_root}:${{PYTHONPATH}}"\n'
+                f'exec "{python_bin}" -m src.client.factorio_wrapper "$@"\n',
                 encoding="utf-8",
             )
 
