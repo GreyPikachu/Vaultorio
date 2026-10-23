@@ -1,0 +1,2 @@
+# Minimal client requirements for Factorio P2P Cloud Sync
+httpx>=0.24.0
