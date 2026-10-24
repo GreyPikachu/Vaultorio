@@ -30,6 +30,10 @@ PLACEHOLDER_USERNAMES: set[str] = {
     "engineer",
     "testplayer",
     "default",
+    "pikachuqa",
+    "pikachutester",
+    "pikachuengineer",
+    "testerpikachu",
 }
 
 
