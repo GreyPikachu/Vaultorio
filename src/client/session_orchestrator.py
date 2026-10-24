@@ -397,6 +397,15 @@ class SessionOrchestrator:
                                 "reason": "uninstalled_by_user",
                             }
 
+                        if new_config and getattr(new_config, "offline_mode", False):
+                            logger.info("Пользователь запросил автономный запуск игры в GUI. Переход в OFFLINE.")
+                            self.role = RoleType.OFFLINE
+                            self.is_prepared = True
+                            return {
+                                "role": self.role,
+                                "reason": "offline_requested_by_user",
+                            }
+
                         if new_config and new_config.is_configured():
                             self.config = new_config
                             if self._owns_hub_client:
@@ -444,9 +453,9 @@ class SessionOrchestrator:
             self.player_name = self.env.resolve_or_init_player_username(fallback_name=fallback)
             logger.info(f"Инициализация сессии для игрока: '{self.player_name}'")
 
-            # Шаг 3: Проверка статуса сервера
+            # Шаг 3: Проверка статуса сервера (быстрый таймаут 5с для моментального офлайна при отсутствии сети)
             try:
-                status = self.hub_client.get_status()
+                status = self.hub_client.get_status(timeout=5.0)
             except Exception as err:
                 # Проверка на 403 Forbidden (токен устройства отозван администратором)
                 is_forbidden = False
@@ -498,6 +507,15 @@ class SessionOrchestrator:
                                 return {
                                     "role": self.role,
                                     "reason": "uninstalled_by_user",
+                                }
+
+                            if new_config and getattr(new_config, "offline_mode", False):
+                                logger.info("Пользователь запросил автономный запуск игры в GUI. Переход в OFFLINE.")
+                                self.role = RoleType.OFFLINE
+                                self.is_prepared = True
+                                return {
+                                    "role": self.role,
+                                    "reason": "offline_requested_by_user",
                                 }
 
                             if new_config and new_config.is_configured():
@@ -572,6 +590,10 @@ class SessionOrchestrator:
                     )
 
                     # Синхронизация сохранения перед стартом
+                    show_role_banner(
+                        "Загрузка актуального мира из облачного сейфа... Игра скоро запустится!",
+                        duration_sec=10.0,
+                    )
                     sync_res = self.hub_client.sync_save_before_host(self.env, status=status)
                     if sync_res.get("mods_mismatch"):
                         logger.warning(

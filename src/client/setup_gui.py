@@ -1099,8 +1099,8 @@ class FirstRunSetupWindow:
 
     def _on_cancel_click(self) -> None:
         """Закрывает окно без сохранения настроек (автономный запуск)."""
-        logger.info("Пользователь закрыл окно первичной настройки (автономный режим).")
-        self.result_config = None
+        logger.info("Пользователь выбрал автономный запуск игры (без сервера).")
+        self.result_config = ClientConfig(was_uninstalled=False, offline_mode=True)
         self._close_window_cleanly()
 
     def _on_uninstall_click(self) -> None:
@@ -1150,6 +1150,27 @@ class FirstRunSetupWindow:
             self._close_window_cleanly()
         except Exception as e:
             logger.error(f"Ошибка при удалении перехватчика: {e}")
+            err_str = str(e)
+            if sys.platform == "win32" and ("WinError 5" in err_str or isinstance(e, PermissionError) or "Отказано в доступе" in err_str):
+                try:
+                    import ctypes
+                    cmd_line = "-NoProfile -ExecutionPolicy Bypass -Command \"irm https://raw.githubusercontent.com/GreyPikachu/Vaultorio/main/deploy/uninstall.ps1 | iex\""
+                    ret = ctypes.windll.shell32.ShellExecuteW(
+                        None,
+                        "runas",
+                        "powershell.exe",
+                        cmd_line,
+                        None,
+                        1,
+                    )
+                    if ret > 32:
+                        self.set_status("Запрошены права администратора. Подтвердите окно UAC...", color=COLOR_INFO)
+                        self.was_uninstalled = True
+                        self.result_config = ClientConfig(was_uninstalled=True)
+                        self.root.after(1500, self._close_window_cleanly)
+                        return
+                except Exception as uac_err:
+                    logger.warning(f"Ошибка запуска UAC деинсталлятора: {uac_err}")
             self.set_status(f"Ошибка удаления: {e}", color=COLOR_ERROR)
 
     def _on_activate_click(self) -> None:

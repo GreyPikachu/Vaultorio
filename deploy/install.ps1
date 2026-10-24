@@ -235,6 +235,15 @@ $defaultHubUrl = "http://${hubIp}:8088"
 & $venvPython -m src.installer.installer --install --game-dir "$foundGame" --wrapper-bin "$wrapperBin" --hub-url "$defaultHubUrl"
 Pop-Location
 
+# 8. Настройка прав доступа для обычных пользователей (бесшовный запуск и удаление без UAC)
+Write-Host "Настройка прав доступа для автономной работы и деинсталляции..." -ForegroundColor Cyan
+try {
+    # *S-1-5-32-545 — интернациональный SID группы BUILTIN\Users (Пользователи)
+    icacls "$foundGame" /grant "*S-1-5-32-545:(OI)(CI)M" /T /C /Q | Out-Null
+} catch {
+    Write-Warning "Предупреждение: не удалось настроить права icacls: $_"
+}
+
 Write-Host ""
 Write-Host "============================================================" -ForegroundColor Green
 Write-Host "      УСТАНОВКА VAULTORIO УСПЕШНО ЗАВЕРШЕНА!               " -ForegroundColor Green

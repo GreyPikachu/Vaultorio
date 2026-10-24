@@ -149,10 +149,13 @@ class HubClient:
     # Раздел 1: Статус сервера и умное ожидание эстафеты (uploading_final)
     # =========================================================================
 
-    def get_status(self) -> dict[str, Any]:
+    def get_status(self, timeout: Optional[float] = None) -> dict[str, Any]:
         """Возвращает текущий статус сервера (состояние, хост, метаданные сейва)."""
         try:
-            resp = self._client.get("/status")
+            get_kwargs = {}
+            if timeout is not None:
+                get_kwargs["timeout"] = timeout
+            resp = self._client.get("/status", **get_kwargs)
             resp.raise_for_status()
             data = resp.json()
 

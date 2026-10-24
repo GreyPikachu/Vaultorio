@@ -436,12 +436,21 @@ class FactorioWrapperInstaller:
             return
 
         try:
-            cmd = f'cmd.exe /c timeout /t 2 /nobreak >nul & del /f /q "{file_path}"'
+            cmd = f'timeout /t 2 /nobreak >nul & del /f /q "{file_path}"'
             creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
+            startupinfo = None
+            if hasattr(subprocess, "STARTUPINFO"):
+                startupinfo = subprocess.STARTUPINFO()
+                startupinfo.dwFlags |= getattr(subprocess, "STARTF_USESHOWWINDOW", 1)
+                startupinfo.wShowWindow = 0
             subprocess.Popen(
                 cmd,
                 shell=True,
                 creationflags=creationflags,
+                startupinfo=startupinfo,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
                 close_fds=True,
             )
         except Exception as e:
@@ -455,12 +464,21 @@ class FactorioWrapperInstaller:
 
         try:
             del_target = f'del /f /q "{to_delete}"' if to_delete and to_delete.exists() else f'del /f /q "{game_bin}"'
-            cmd = f'cmd.exe /c timeout /t 2 /nobreak >nul & {del_target} & move /y "{core_bin}" "{game_bin}"'
+            cmd = f'timeout /t 2 /nobreak >nul & {del_target} & move /y "{core_bin}" "{game_bin}"'
             creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
+            startupinfo = None
+            if hasattr(subprocess, "STARTUPINFO"):
+                startupinfo = subprocess.STARTUPINFO()
+                startupinfo.dwFlags |= getattr(subprocess, "STARTF_USESHOWWINDOW", 1)
+                startupinfo.wShowWindow = 0
             subprocess.Popen(
                 cmd,
                 shell=True,
                 creationflags=creationflags,
+                startupinfo=startupinfo,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
                 close_fds=True,
             )
             logger.info(f"Запланировано отложенное восстановление {game_bin.name} через фоновый процесс.")
@@ -551,12 +569,26 @@ class FactorioWrapperInstaller:
 
             # Удаление конфигурационного файла factorio_sync_config.json
             sync_cfg = gdir / "factorio_sync_config.json"
-            sync_cfg.unlink(missing_ok=True)
+            try:
+                if sync_cfg.is_file():
+                    try:
+                        os.chmod(sync_cfg, 0o777)
+                    except Exception:
+                        pass
+                    sync_cfg.unlink(missing_ok=True)
+            except Exception as cfg_err:
+                logger.warning(f"Не удалось напрямую удалить {sync_cfg}: {cfg_err}")
+                self._schedule_deferred_deletion(sync_cfg)
 
             # Восстановление спрятанных сейвов из .cloud_stash/ обратно в корень saves/
             env = FactorioEnvironment(custom_game_root=gdir)
             try:
-                env.sync_config_path.unlink(missing_ok=True)
+                if env.sync_config_path.is_file():
+                    try:
+                        os.chmod(env.sync_config_path, 0o777)
+                    except Exception:
+                        pass
+                    env.sync_config_path.unlink(missing_ok=True)
             except Exception:
                 pass
             env.restore_hidden_cloud_save()
@@ -572,13 +604,22 @@ class FactorioWrapperInstaller:
                     logger.warning(f"Ошибка при очистке .cloud_stash: {stash_err}")
 
             # Удаление Windows fallback-скрипта (.cmd)
-            game_bin.with_suffix(".cmd").unlink(missing_ok=True)
+            try:
+                game_bin.with_suffix(".cmd").unlink(missing_ok=True)
+            except Exception:
+                pass
 
             # Удаление лог-файлов перехватчика
             for log_name in ["factorio_wrapper.log", "factorio_sync.log"]:
-                (gdir / log_name).unlink(missing_ok=True)
+                try:
+                    (gdir / log_name).unlink(missing_ok=True)
+                except Exception:
+                    pass
                 if getattr(env, "user_data_dir", None) and env.user_data_dir != gdir:
-                    (env.user_data_dir / log_name).unlink(missing_ok=True)
+                    try:
+                        (env.user_data_dir / log_name).unlink(missing_ok=True)
+                    except Exception:
+                        pass
 
             return {
                 "status": "uninstalled",
