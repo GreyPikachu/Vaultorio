@@ -33,6 +33,7 @@ def build_wrapper(
     dist_dir: Path,
     work_dir: Path,
     clean: bool = True,
+    icon_path: Optional[Path] = None,
 ) -> Path:
     """Собирает standalone-бинарник клиентского перехватчика factorio_wrapper."""
     logger.info("=" * 60)
@@ -72,6 +73,16 @@ def build_wrapper(
         "--hidden-import", "httpx",
     ]
 
+    # Внедрение оригинальной иконки Factorio, чтобы factorio.exe не имел значок Python
+    if icon_path is None:
+        default_icon = PROJECT_ROOT / "resources" / "factorio.ico"
+        if default_icon.is_file():
+            icon_path = default_icon
+
+    if icon_path is not None and Path(icon_path).is_file():
+        cmd.extend(["--icon", str(icon_path)])
+        logger.info(f"Внедрение иконки в перехватчик: {icon_path}")
+
     if clean:
         cmd.append("--clean")
 
@@ -93,6 +104,7 @@ def build_installer(
     work_dir: Path,
     wrapper_binary: Optional[Path] = None,
     clean: bool = True,
+    icon_path: Optional[Path] = None,
 ) -> Path:
     """Собирает standalone-установщик Factorio Coop Setup."""
     logger.info("=" * 60)
@@ -127,6 +139,16 @@ def build_installer(
         "--hidden-import", "tkinter.filedialog",
         "--hidden-import", "tkinter.messagebox",
     ]
+
+    # Внедрение иконки в установщик
+    if icon_path is None:
+        default_icon = PROJECT_ROOT / "resources" / "factorio.ico"
+        if default_icon.is_file():
+            icon_path = default_icon
+
+    if icon_path is not None and Path(icon_path).is_file():
+        cmd.extend(["--icon", str(icon_path)])
+        logger.info(f"Внедрение иконки в установщик: {icon_path}")
 
     # Если собран бинарник перехватчика, упаковываем его внутрь установщика
     if wrapper_binary is not None and wrapper_binary.is_file():
@@ -171,18 +193,20 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="Временный рабочий каталог PyInstaller",
     )
     parser.add_argument("--clean", action="store_true", default=True, help="Очищать временный кэш сборки")
+    parser.add_argument("--icon", type=str, default=None, help="Путь к файлу иконки .ico")
 
     args = parser.parse_args(argv)
     dist = Path(args.dist_dir).resolve()
     work = Path(args.work_dir).resolve()
+    icon = Path(args.icon).resolve() if args.icon else None
 
     try:
         wrapper_bin: Optional[Path] = None
         if args.target in ("wrapper", "all"):
-            wrapper_bin = build_wrapper(dist_dir=dist, work_dir=work, clean=args.clean)
+            wrapper_bin = build_wrapper(dist_dir=dist, work_dir=work, clean=args.clean, icon_path=icon)
 
         if args.target in ("installer", "all"):
-            build_installer(dist_dir=dist, work_dir=work, wrapper_binary=wrapper_bin, clean=args.clean)
+            build_installer(dist_dir=dist, work_dir=work, wrapper_binary=wrapper_bin, clean=args.clean, icon_path=icon)
 
         logger.info("Сборка всех компонентов успешно завершена!")
         return 0

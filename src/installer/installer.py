@@ -26,7 +26,9 @@ import logging
 import os
 import platform
 import shutil
+import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
@@ -423,6 +425,92 @@ class FactorioWrapperInstaller:
                 except Exception as cs_err:
                     logger.debug(f"codesign не выполнен для {core_bin}: {cs_err}")
 
+    @staticmethod
+    def _schedule_deferred_deletion(file_path: Path) -> None:
+        """Планирует отложенное удаление временного файла после завершения процесса."""
+        if platform.system() != "Windows":
+            try:
+                file_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+            return
+
+        try:
+            cmd = f'cmd.exe /c timeout /t 2 /nobreak >nul & del /f /q "{file_path}"'
+            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
+            subprocess.Popen(
+                cmd,
+                shell=True,
+                creationflags=creationflags,
+                close_fds=True,
+            )
+        except Exception as e:
+            logger.debug(f"Не удалось запланировать отложенное удаление {file_path}: {e}")
+
+    @staticmethod
+    def _schedule_deferred_restore(game_bin: Path, core_bin: Path, to_delete: Optional[Path] = None) -> None:
+        """Планирует отложенное восстановление бинарников через CMD после завершения процесса."""
+        if platform.system() != "Windows":
+            return
+
+        try:
+            del_target = f'del /f /q "{to_delete}"' if to_delete and to_delete.exists() else f'del /f /q "{game_bin}"'
+            cmd = f'cmd.exe /c timeout /t 2 /nobreak >nul & {del_target} & move /y "{core_bin}" "{game_bin}"'
+            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
+            subprocess.Popen(
+                cmd,
+                shell=True,
+                creationflags=creationflags,
+                close_fds=True,
+            )
+            logger.info(f"Запланировано отложенное восстановление {game_bin.name} через фоновый процесс.")
+        except Exception as e:
+            logger.error(f"Не удалось запланировать отложенное восстановление: {e}")
+
+    def _safe_restore_binary(self, game_bin: Path, core_bin: Path) -> None:
+        """Безопасно восстанавливает оригинальный бинарник core_bin на место game_bin.
+
+        Учитывает блокировку исполняемого файла на Windows (WinError 5), если удаление
+        вызвано изнутри работающего процесса перехватчика.
+        """
+        try:
+            game_bin.unlink(missing_ok=True)
+            shutil.move(str(core_bin), str(game_bin))
+            return
+        except (PermissionError, OSError) as lock_err:
+            logger.warning(
+                f"Не удалось напрямую удалить {game_bin.name} ({lock_err}). "
+                f"Файл заблокирован исполняемым процессом. Применяем Windows self-rename обход."
+            )
+
+        # Попытка 1: Переименование запущенного файла (Windows разрешает rename открытого .exe)
+        renamed = False
+        to_delete = game_bin.with_name(f"{game_bin.name}.to_delete_{int(time.time())}")
+        try:
+            if to_delete.exists():
+                to_delete.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+        try:
+            game_bin.replace(to_delete)
+            renamed = True
+            logger.info(f"Заблокированный файл {game_bin.name} переименован в {to_delete.name}")
+        except Exception as ren_err:
+            logger.warning(f"Не удалось переименовать заблокированный файл: {ren_err}")
+
+        if renamed:
+            try:
+                shutil.move(str(core_bin), str(game_bin))
+                self._schedule_deferred_deletion(to_delete)
+                logger.info(f"Оригинал {core_bin.name} успешно перемещен на место {game_bin.name}")
+                return
+            except Exception as move_err:
+                logger.warning(f"Не удалось переместить {core_bin.name} после переименования: {move_err}")
+
+        # Попытка 2: Фоновый отложенный скрипт CMD
+        self._schedule_deferred_restore(game_bin, core_bin, to_delete if renamed else None)
+
     def uninstall(
         self,
         game_dir: Path | str,
@@ -445,9 +533,11 @@ class FactorioWrapperInstaller:
         # Если factorio_core существует — возвращаем его на место factorio
         if core_bin.is_file():
             logger.info(f"Восстановление оригинальной игры: удаляем {game_bin.name} и возвращаем {core_bin.name}")
-            game_bin.unlink(missing_ok=True)
-            shutil.move(str(core_bin), str(game_bin))
-            os.chmod(game_bin, 0o755)
+            self._safe_restore_binary(game_bin, core_bin)
+            try:
+                os.chmod(game_bin, 0o755)
+            except Exception:
+                pass
             if sys.platform == "darwin" and shutil.which("codesign"):
                 try:
                     subprocess.run(

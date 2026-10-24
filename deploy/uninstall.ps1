@@ -108,6 +108,10 @@ if ($foundGame) {
     $coreBin = "$foundGame\bin\x64\factorio_core.exe"
     $gameBin = "$foundGame\bin\x64\factorio.exe"
     
+    # Завершение зависших процессов игры перед восстановлением файлов
+    Get-Process factorio, factorio_wrapper -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Milliseconds 500
+
     if (Test-Path $coreBin) {
         Write-Host "[1/3] Восстановление оригинального factorio.exe..." -ForegroundColor Cyan
         Move-Item -Path $coreBin -Destination $gameBin -Force
