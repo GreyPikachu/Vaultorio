@@ -1739,9 +1739,39 @@ class FirstRunSetupWindow:
             self.existing_config = cfg
             self.is_already_configured = True
 
-            # Случай А1: на сервере уже есть мир -> мгновенный запуск
+            # Случай А1: на сервере уже есть мир -> скачиваем актуальный сейв со шкалой прогресса перед запуском
             if server_has_save:
-                logger.info("На сервере уже есть активный мир. Селектор пропускается.")
+                logger.info("На сервере уже есть активный мир. Проверяем необходимость загрузки локальной копии...")
+                server_sha = st.get("sha256") or st.get("save", {}).get("sha256")
+                local_save = self.env.saves_dir / self.env.cloud_save_name
+                needs_download = True
+                if local_save.is_file() and server_sha:
+                    try:
+                        from src.client.hub_client import compute_file_sha256
+                        if compute_file_sha256(local_save) == server_sha:
+                            needs_download = False
+                    except Exception:
+                        needs_download = True
+
+                if needs_download:
+                    try:
+                        logger.info("Скачивание актуального сохранения мира через окно активации...")
+                        self._schedule_ui(lambda: self.show_progress("Скачивание мира с сервера..."))
+                        self._schedule_ui(lambda: self.set_status("Загрузка актуального сохранения из облака...", color=COLOR_INFO))
+
+                        def _progress_cb(downloaded: int, total: int, speed: float) -> None:
+                            self._schedule_ui(lambda: self.update_progress(downloaded, total, speed))
+
+                        self.env.saves_dir.mkdir(parents=True, exist_ok=True)
+                        hub_client.download_save(
+                            target_path=local_save,
+                            expected_sha=server_sha,
+                            progress_callback=_progress_cb,
+                        )
+                        logger.info(f"Мир успешно сохранен в {local_save}")
+                    except Exception as dl_err:
+                        logger.warning(f"Предварительная загрузка сохранения в GUI не удалась ({dl_err}), делегирование оркестратору.")
+
                 self._schedule_ui(self._on_activation_success)
                 return
 
