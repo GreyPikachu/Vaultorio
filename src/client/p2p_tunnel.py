@@ -673,6 +673,9 @@ class GuestP2PProxy:
         self._last_punch_sent: float = 0.0
         self._last_stun_hello: float = 0.0
         self._last_keepalive: float = 0.0
+        self._last_incoming_packet_time: float = 0.0
+        self._last_factorio_packet_time: float = 0.0
+        self._last_reconnect_time: float = 0.0
 
     @property
     def is_running(self) -> bool:
@@ -776,6 +779,39 @@ class GuestP2PProxy:
         except Exception as err:
             logger.warning(f"Ошибка отправки GUEST_HELLO: {err}")
 
+    def _reconnect_external_network(self, now: float, reason: str = "") -> None:
+        """Пересоздает внешний сокет и запрашивает новое рукопожатие на STUN при смене сети."""
+        with self._lock:
+            logger.info(
+                f"GuestP2PProxy: обнаружена смена сети или потеря связи ({reason}). "
+                "Автоматическое переподключение внешнего сокета..."
+            )
+            if self._s_guest:
+                try:
+                    self._s_guest.close()
+                except Exception:
+                    pass
+                self._s_guest = None
+
+            try:
+                self._s_guest = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                _configure_udp_socket(self._s_guest)
+                bind_socket_to_physical_interface(self._s_guest)
+                self._s_guest.bind(("0.0.0.0", 0))
+            except Exception as err:
+                logger.error(f"Не удалось пересоздать внешний сокет: {err}")
+                return
+
+            self._peer_match_received = False
+            self._is_direct_p2p = False
+            self._is_relay_active = True
+            self._host_active_endpoint = None
+            self._last_incoming_packet_time = 0.0
+            self._last_reconnect_time = now
+            self.local_ip = detect_physical_lan_ip(self.stun_host)
+
+        self._send_guest_hello()
+
     def _worker_loop(self) -> None:
         """Главный цикл мультиплексирования прокси через select.select."""
         self._send_guest_hello()
@@ -788,6 +824,16 @@ class GuestP2PProxy:
                 if now - self._last_stun_hello >= 3.0:
                     self._send_guest_hello()
             else:
+                # Автоматическая детекция смены сети / потери пакетов:
+                # Если Factorio пытается отправлять данные, но от Хоста нет входящих пакетов > 3.5 сек
+                if (
+                    self._last_factorio_packet_time > 0
+                    and (now - self._last_factorio_packet_time < 3.0)
+                    and (now - self._last_incoming_packet_time > 3.5)
+                    and (now - self._last_reconnect_time >= 4.0)
+                ):
+                    self._reconnect_external_network(now, reason="no_response_from_host")
+
                 # После получения PEER_MATCH шлём PUNCH_SYN
                 if not self.is_direct_p2p:
                     # Проверяем таймаут перехода на резервный релей
@@ -871,22 +917,25 @@ class GuestP2PProxy:
             return
 
         self._factorio_client_addr = addr
+        self._last_factorio_packet_time = time.time()
 
         # Если установлен прямой P2P-канал
         if self.is_direct_p2p and self._host_active_endpoint:
             pkt = format_data_packet(self.guest_id, data, is_relay=False)
             try:
                 self._s_guest.sendto(pkt, self._host_active_endpoint)
-            except Exception as err:
+            except OSError as err:
                 logger.debug(f"Ошибка прямой отправки датаграммы Хосту: {err}")
+                self._reconnect_external_network(time.time(), reason=f"socket_send_error:{err}")
 
         # Иначе отправляем через релей на VPS
         else:
             pkt = format_data_packet(self.guest_id, data, is_relay=True)
             try:
                 self._s_guest.sendto(pkt, (self.stun_host, self.stun_port))
-            except Exception as err:
+            except OSError as err:
                 logger.debug(f"Ошибка отправки через релей на VPS: {err}")
+                self._reconnect_external_network(time.time(), reason=f"relay_send_error:{err}")
 
     def _handle_external_socket_read(self) -> None:
         """Читает входящие пакеты из интернета (от Хоста напрямую или от STUN-релея)."""
@@ -897,6 +946,9 @@ class GuestP2PProxy:
             data, addr = self._s_guest.recvfrom(MAX_UDP_PACKET)
         except (BlockingIOError, ConnectionResetError, OSError):
             return
+
+        with self._lock:
+            self._last_incoming_packet_time = time.time()
 
         # А. Управляющий пакет JSON
         if data.startswith(HEADER_CONTROL):

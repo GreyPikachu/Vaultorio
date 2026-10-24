@@ -894,3 +894,34 @@ def test_t9_7_5_guest_proxy_only_binds_external_socket():
         finally:
             guest_proxy.stop()
 
+
+def test_t9_7_6_guest_proxy_auto_reconnect_on_network_change():
+    """T9.7.6: Автоматическое переподключение и пересоздание внешнего сокета при смене сети."""
+    from unittest.mock import patch
+
+    guest_proxy = GuestP2PProxy(
+        guest_name="ReconnectTest",
+        stun_host="127.0.0.1",
+        stun_port=_get_free_udp_port(),
+        proxy_port=_get_free_udp_port(),
+    )
+
+    with patch.object(guest_proxy, "_send_guest_hello") as mock_hello:
+        guest_proxy.start()
+        time.sleep(0.05)
+
+        old_sock = guest_proxy._s_guest
+        assert old_sock is not None
+
+        # Имитируем смену сети / вызов переподключения
+        guest_proxy._reconnect_external_network(time.time(), reason="test_network_switch")
+
+        new_sock = guest_proxy._s_guest
+        assert new_sock is not None
+        assert new_sock is not old_sock
+        assert mock_hello.called
+        assert guest_proxy._peer_match_received is False
+
+        guest_proxy.stop()
+
+
