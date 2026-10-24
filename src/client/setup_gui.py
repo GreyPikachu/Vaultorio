@@ -483,10 +483,6 @@ class FirstRunSetupWindow:
 
         self._on_entry_key = _handle_entry_keypress
 
-        # Привязываем ко всем классам Entry и TEntry
-        for cls_name in ["Entry", "TEntry"]:
-            self.root.bind_class(cls_name, "<KeyPress>", _handle_entry_keypress)
-
     def _schedule_ui(self, callback: Any) -> None:
         """Безопасно ставит вызов в очередь UI-потока и будит Cocoa event loop на macOS."""
         self.root.after(0, callback)
@@ -826,6 +822,12 @@ class FirstRunSetupWindow:
                 command=self._on_uninstall_click,
             )
             self.uninstall_btn.pack(fill=tk.X)
+
+        # Устанавливаем фокус ввода на поле ввода при открытии
+        try:
+            self.code_entry.focus_set()
+        except Exception:
+            pass
 
     # =========================================================================
     # Обработчики событий пользовательского интерфейса
