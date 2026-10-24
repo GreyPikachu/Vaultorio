@@ -177,12 +177,39 @@ cd /opt/factorio-hub
 
 ### Установка для игроков (macOS и Windows)
 
-Для удобной установки без использования консоли подготовлены готовые скрипты:
+#### Быстрая установка в одну команду (рекомендуется)
 
-- **macOS**: дважды щелкните по скрипту `deploy/client/macos/install_mac.command`.
+Скрипт автоматически найдет установленную Factorio на диске, проверит и при необходимости настроит окружение, загрузит необходимые компоненты и внедрит прозрачный перехватчик в игру:
+
+- **Windows 10 / 11** (PowerShell от имени администратора):
+```powershell
+irm https://raw.githubusercontent.com/GreyPikachu/Vaultorio/main/deploy/install.ps1 | iex
+```
+
+- **macOS** (Терминал):
+```bash
+curl -fsSL https://raw.githubusercontent.com/GreyPikachu/Vaultorio/main/deploy/install.sh | bash
+```
+
+---
+
+#### Полное удаление и возврат к оригинальной игре
+
+- **Windows** (PowerShell от имени администратора):
+```powershell
+irm https://raw.githubusercontent.com/GreyPikachu/Vaultorio/main/deploy/uninstall.ps1 | iex
+```
+
+- **macOS** (Терминал):
+```bash
+curl -fsSL https://raw.githubusercontent.com/GreyPikachu/Vaultorio/main/deploy/uninstall.sh | bash
+```
+
+---
+
+#### Локальная установка через файлы скриптов (если репозиторий уже склонирован)
 - **Windows**: дважды щелкните по скрипту `deploy/client/windows/install_windows.bat`.
-
-Скрипт автоматически проверит наличие Python, создаст виртуальное окружение, установит зависимости и внедрит прозрачный перехватчик в игру, сохранив оригинальный исполняемый файл Factorio в полной безопасности.
+- **macOS**: дважды щелкните по скрипту `deploy/client/macos/install_mac.command`.
 
 ### Как играть
 
