@@ -59,7 +59,7 @@ class TestFirstRunSetupWindow(unittest.TestCase):
             custom_game_root=self.game_root,
             custom_user_data_dir=self.user_data,
         )
-        self.env.set_player_username("PikachuEngineer")
+        self.env.set_player_username("GreyPikachu")
 
         # Создаем tk.Tk в скрытом режиме без вывода на экран
         self.root = tk.Tk()
@@ -82,7 +82,7 @@ class TestFirstRunSetupWindow(unittest.TestCase):
         )
 
         # Никнейм должен быть автоматически прочитан из player-data.json
-        self.assertEqual(app.player_name, "PikachuEngineer")
+        self.assertEqual(app.player_name, "GreyPikachu")
         self.assertEqual(self.root.title(), "Factorio Co-op - Подключение к облачному миру")
 
         # Поля ввода
@@ -108,6 +108,55 @@ class TestFirstRunSetupWindow(unittest.TestCase):
 
         # Текст должен быть очищен от пробелов и помещен в code_var
         self.assertEqual(app.code_var.get(), "FCT1-SAMPLE-INVITE-TOKEN")
+
+    def test_02b_keyboard_shortcuts_select_all_and_clear(self):
+        """Проверка сочетаний клавиш Cmd+A (латиница и кириллица) и Cmd+Backspace."""
+        app = FirstRunSetupWindow(
+            root=self.root,
+            env=self.env,
+            installer_mode=False,
+        )
+        self.root.update()
+
+        # Помещаем тестовый код в поле ввода
+        app.code_entry.focus_force()
+        app.code_var.set("FCT1-TEST-SHORTCUTS")
+        self.root.update()
+
+        # 1. Проверяем Select All с латинской раскладкой (Cmd+A: keycode 0, keysym 'a')
+        evt_latin = tk.Event()
+        evt_latin.widget = app.code_entry
+        evt_latin.keycode = 0
+        evt_latin.keysym = "a"
+        evt_latin.state = 8
+        res = app._on_entry_key(evt_latin)
+        self.assertEqual(res, "break")
+        self.assertTrue(app.code_entry.selection_present())
+        self.assertEqual(app.code_entry.selection_get(), "FCT1-TEST-SHORTCUTS")
+
+        # 2. Снимаем выделение и проверяем русскую раскладку (Cmd+Ф: keycode 0, keysym 'Cyrillic_ef')
+        app.code_entry.select_clear()
+        self.assertFalse(app.code_entry.selection_present())
+
+        evt_cyrillic = tk.Event()
+        evt_cyrillic.widget = app.code_entry
+        evt_cyrillic.keycode = 0
+        evt_cyrillic.keysym = "Cyrillic_ef"
+        evt_cyrillic.state = 8
+        res = app._on_entry_key(evt_cyrillic)
+        self.assertEqual(res, "break")
+        self.assertTrue(app.code_entry.selection_present())
+        self.assertEqual(app.code_entry.selection_get(), "FCT1-TEST-SHORTCUTS")
+
+        # 3. Проверяем Cmd+Backspace (быстрая очистка поля)
+        evt_bs = tk.Event()
+        evt_bs.widget = app.code_entry
+        evt_bs.keycode = 51
+        evt_bs.keysym = "BackSpace"
+        evt_bs.state = 8
+        res = app._on_entry_key(evt_bs)
+        self.assertEqual(res, "break")
+        self.assertEqual(app.code_entry.get(), "")
 
     def test_03_toggle_password_visibility(self):
         """Проверка переключателя «Показать» / «Скрыть» в поле секретного слова."""
@@ -167,7 +216,7 @@ class TestFirstRunSetupWindow(unittest.TestCase):
             hub_http_url="http://127.0.0.1:8088",
             hub_stun_host="127.0.0.1",
             hub_stun_port=14197,
-            player_name="PikachuEngineer",
+            player_name="GreyPikachu",
             device_token="dev_tok_success_999",
             device_id="dev_id_abc",
         )
@@ -188,7 +237,7 @@ class TestFirstRunSetupWindow(unittest.TestCase):
         mock_activate.assert_called_once_with(
             invite_code="FCT1-TOKEN-123",
             passphrase="mypassword",
-            player_name="PikachuEngineer",
+            player_name="GreyPikachu",
             config_path=app.config_path,
             http_client=None,
         )

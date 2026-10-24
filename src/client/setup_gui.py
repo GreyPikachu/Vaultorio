@@ -328,7 +328,7 @@ class FirstRunSetupWindow:
         self.root.configure(bg=COLOR_BG)
         self.root.resizable(False, False)
         self.root.bind("<<Wakeup>>", lambda e: None)
-        self._bind_macos_shortcuts()
+        self._setup_menus_and_shortcuts()
 
         width = 540
         height = 640 if self.installer_mode else 540
@@ -345,37 +345,147 @@ class FirstRunSetupWindow:
             logger.debug(f"Не удалось центрировать окно: {err}")
             self.root.geometry(f"{width}x{height}")
 
-    def _bind_macos_shortcuts(self) -> None:
-        """Добавляет нативные сочетания клавиш (Cmd+A, Cmd+V, Cmd+Backspace) для всех полей ввода."""
-        def _on_select_all(event: Any) -> str:
-            widget = event.widget
-            try:
-                widget.selection_range(0, tk.END)
-            except Exception:
+    def _setup_menus_and_shortcuts(self) -> None:
+        """Настраивает системное меню Edit и универсальные сочетания клавиш (Cmd/Ctrl+A, Cmd/Ctrl+V и др.)."""
+        tk = self.tk
+
+        # Создаем нативное системное меню Edit (Правка) для macOS Cocoa responder chain
+        try:
+            menubar = tk.Menu(self.root)
+            self.root.config(menu=menubar)
+            edit_menu = tk.Menu(menubar, tearoff=False)
+            menubar.add_cascade(label="Edit", menu=edit_menu)
+
+            def _menu_select_all() -> None:
+                widget = self.root.focus_get()
+                if widget and hasattr(widget, "select_range"):
+                    try:
+                        widget.select_range(0, "end")
+                        widget.icursor("end")
+                    except Exception:
+                        pass
+
+            def _menu_delete_all() -> None:
+                widget = self.root.focus_get()
+                if widget and hasattr(widget, "delete"):
+                    try:
+                        widget.delete(0, "end")
+                    except Exception:
+                        pass
+
+            edit_menu.add_command(
+                label="Cut",
+                accelerator="Cmd+X",
+                command=lambda: self.root.focus_get() and self.root.focus_get().event_generate("<<Cut>>"),
+            )
+            edit_menu.add_command(
+                label="Copy",
+                accelerator="Cmd+C",
+                command=lambda: self.root.focus_get() and self.root.focus_get().event_generate("<<Copy>>"),
+            )
+            edit_menu.add_command(
+                label="Paste",
+                accelerator="Cmd+V",
+                command=lambda: self.root.focus_get() and self.root.focus_get().event_generate("<<Paste>>"),
+            )
+            edit_menu.add_command(
+                label="Select All",
+                accelerator="Cmd+A",
+                command=_menu_select_all,
+            )
+            edit_menu.add_command(
+                label="Clear",
+                accelerator="Cmd+Backspace",
+                command=_menu_delete_all,
+            )
+        except Exception as err:
+            logger.debug(f"Не удалось настроить меню Edit: {err}")
+
+        # Универсальный обработчик для полей ввода (Entry и TEntry) с поддержкой русской раскладки
+        def _handle_entry_keypress(event: Any) -> Optional[str]:
+            widget = getattr(event, "widget", None)
+            if not widget:
+                return None
+
+            state = getattr(event, "state", 0)
+            is_modifier = bool(state & 8) or bool(state & 4)
+            if not is_modifier:
+                return None
+
+            keysym = str(getattr(event, "keysym", "")).lower()
+            keycode = getattr(event, "keycode", -1)
+
+            # Выделить всё: клавиша 'A' (на Mac keycode == 0, keysym 'a' или русская 'ф'/'cyrillic_ef')
+            if keycode == 0 or keysym in ("a", "cyrillic_ef", "ф"):
+                if hasattr(widget, "select_range"):
+                    try:
+                        widget.select_range(0, "end")
+                        widget.icursor("end")
+                    except Exception:
+                        pass
+                    return "break"
+                if hasattr(widget, "selection_range"):
+                    try:
+                        widget.selection_range(0, "end")
+                        widget.icursor("end")
+                    except Exception:
+                        pass
+                    return "break"
+
+            # Очистить всё поле ввода (Cmd+Backspace / Cmd+Delete):
+            # На Mac keycode 51 (Backspace), 117 (Delete)
+            if keycode in (51, 117) or keysym in ("backspace", "delete"):
+                if hasattr(widget, "delete"):
+                    try:
+                        widget.delete(0, "end")
+                    except Exception:
+                        pass
+                    return "break"
+
+            # Копировать (Cmd+C / Ctrl+C):
+            # На Mac keycode 8, keysym 'c' или русская 'с'/'cyrillic_es'
+            if keycode == 8 or keysym in ("c", "cyrillic_es", "с"):
+                if hasattr(widget, "selection_present") and widget.selection_present():
+                    try:
+                        sel_text = widget.selection_get()
+                        self.root.clipboard_clear()
+                        self.root.clipboard_append(sel_text)
+                    except Exception:
+                        pass
+                    return "break"
+
+            # Вставить (Cmd+V / Ctrl+V):
+            # На Mac keycode 9, keysym 'v' или русская 'м'/'cyrillic_em'
+            if keycode == 9 or keysym in ("v", "cyrillic_em", "м"):
                 try:
-                    widget.select_range(0, tk.END)
+                    clip_text = self.root.clipboard_get()
+                    if hasattr(widget, "selection_present") and widget.selection_present():
+                        widget.delete("sel.first", "sel.last")
+                    widget.insert("insert", clip_text)
                 except Exception:
                     pass
-            try:
-                widget.icursor(tk.END)
-            except Exception:
-                pass
-            return "break"
+                return "break"
 
-        def _on_delete_all(event: Any) -> str:
-            widget = event.widget
-            try:
-                widget.delete(0, tk.END)
-            except Exception:
-                pass
-            return "break"
+            # Вырезать (Cmd+X / Ctrl+X):
+            # На Mac keycode 7, keysym 'x' или русская 'ч'/'cyrillic_che'
+            if keycode == 7 or keysym in ("x", "cyrillic_che", "ч"):
+                if hasattr(widget, "selection_present") and widget.selection_present():
+                    try:
+                        sel_text = widget.selection_get()
+                        self.root.clipboard_clear()
+                        self.root.clipboard_append(sel_text)
+                        widget.delete("sel.first", "sel.last")
+                    except Exception:
+                        pass
+                    return "break"
 
-        for seq in ["<Command-a>", "<Command-A>", "<Control-a>", "<Control-A>"]:
-            self.root.bind_class("Entry", seq, _on_select_all)
-            self.root.bind_class("TEntry", seq, _on_select_all)
-        for seq in ["<Command-BackSpace>", "<Command-Delete>"]:
-            self.root.bind_class("Entry", seq, _on_delete_all)
-            self.root.bind_class("TEntry", seq, _on_delete_all)
+            return None
+
+        self._on_entry_key = _handle_entry_keypress
+
+        # Привязываем ко всем классам Entry и TEntry
+        for cls_name in ["Entry", "TEntry"]:
+            self.root.bind_class(cls_name, "<KeyPress>", _handle_entry_keypress)
 
     def _schedule_ui(self, callback: Any) -> None:
         """Безопасно ставит вызов в очередь UI-потока и будит Cocoa event loop на macOS."""
@@ -647,6 +757,12 @@ class FirstRunSetupWindow:
             command=self._on_toggle_pass,
         )
         self.toggle_pass_btn.pack(side=tk.RIGHT)
+
+        if hasattr(self, "_on_entry_key"):
+            self.code_entry.bind("<KeyPress>", self._on_entry_key)
+            self.pass_entry.bind("<KeyPress>", self._on_entry_key)
+            if self.installer_mode and hasattr(self, "game_path_entry"):
+                self.game_path_entry.bind("<KeyPress>", self._on_entry_key)
 
         # 6. Строка состояния (Status Bar)
         initial_status = (
