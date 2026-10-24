@@ -109,13 +109,50 @@ if ($foundGame) {
     $gameBin = "$foundGame\bin\x64\factorio.exe"
     
     # Завершение зависших процессов игры перед восстановлением файлов
-    Get-Process factorio, factorio_wrapper -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-    Start-Sleep -Milliseconds 500
+    Get-Process factorio, factorio_core, factorio_wrapper -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+    
+    # Ожидание полного освобождения дескрипторов файлов процессом
+    $maxWait = 10
+    while ($maxWait -gt 0 -and (Get-Process factorio, factorio_wrapper -ErrorAction SilentlyContinue)) {
+        Start-Sleep -Milliseconds 500
+        $maxWait--
+    }
 
     if (Test-Path $coreBin) {
         Write-Host "[1/3] Восстановление оригинального factorio.exe..." -ForegroundColor Cyan
-        Move-Item -Path $coreBin -Destination $gameBin -Force
-        Write-Host "Оригинальный исполняемый файл игры успешно восстановлен!" -ForegroundColor Green
+        
+        # Снятие блокировок и удаление старого перехватчика с повторными попытками
+        $restored = $false
+        for ($retry = 0; $retry -lt 6; $retry++) {
+            try {
+                if (Test-Path $gameBin) {
+                    Set-ItemProperty -Path $gameBin -Name IsReadOnly -Value $false -ErrorAction SilentlyContinue
+                    Remove-Item -Path $gameBin -Force -ErrorAction Stop
+                }
+                Move-Item -Path $coreBin -Destination $gameBin -Force -ErrorAction Stop
+                $restored = $true
+                break
+            } catch {
+                Start-Sleep -Milliseconds 600
+            }
+        }
+
+        if (-not $restored) {
+            # Запасной вариант: принудительное копирование с перезаписью
+            try {
+                Copy-Item -Path $coreBin -Destination $gameBin -Force -ErrorAction SilentlyContinue
+                Remove-Item -Path $coreBin -Force -ErrorAction SilentlyContinue
+                $restored = $true
+            } catch {
+                Write-Warning "Не удалось заменить файл сразу: $_"
+            }
+        }
+
+        if ($restored) {
+            Write-Host "Оригинальный исполняемый файл игры успешно восстановлен!" -ForegroundColor Green
+        } else {
+            Write-Host "ВНИМАНИЕ: Не удалось автоматически заменить файл $gameBin. Переименуйте $coreBin в $gameBin вручную." -ForegroundColor Red
+        }
     } else {
         Write-Host "[1/3] factorio_core.exe не обнаружен (игра уже в чистом виде)." -ForegroundColor Yellow
     }
