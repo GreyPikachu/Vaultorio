@@ -20,8 +20,8 @@ Environment=PYTHONUNBUFFERED=1
 
 # Cgroup Resource Isolation (Strict VPN protection limits)
 MemoryAccounting=true
-MemoryHigh=48M
-MemoryMax=64M
+MemoryHigh=96M
+MemoryMax=128M
 CPUQuota=15%
 
 # Security & Sandboxing Policies

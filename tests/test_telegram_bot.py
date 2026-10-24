@@ -6,6 +6,7 @@ Uses unittest.IsolatedAsyncioTestCase for native async test execution.
 """
 
 from dataclasses import asdict
+import hashlib
 import json
 from pathlib import Path
 import tempfile
@@ -13,9 +14,13 @@ import time
 from typing import Any, Dict, List
 import unittest
 from unittest import mock
+import zipfile
 
+from fastapi.testclient import TestClient
 import httpx
 
+from src.server.admin_cli import main as admin_cli_main
+from src.server.api import create_app
 from src.server.auth_manager import AuthManager
 from src.server.config import ServerConfig
 from src.server.session_manager import SessionLockManager, SessionState
@@ -526,3 +531,266 @@ class TestTelegramBotServiceAsync(unittest.IsolatedAsyncioTestCase):
                     ),
                     f"Forbidden emoji character detected in button text: '{char}' in '{text}'",
                 )
+
+
+class TestTelegramBotNotifyHelpers(unittest.IsolatedAsyncioTestCase):
+    """Tests for TelegramBotService event notification dispatchers."""
+
+    async def asyncSetUp(self):
+        self.temp_dir = Path(tempfile.mkdtemp(prefix="test_tg_notify_"))
+        self.config = ServerConfig(
+            storage_dir=self.temp_dir,
+            http_port=8088,
+            udp_stun_port=14197,
+        )
+        self.transport = MockTransport()
+        self.client = httpx.AsyncClient(transport=self.transport)
+        self.bot = TelegramBotService(config=self.config, client=self.client)
+        self.bot.settings.bot_token = "123:test"
+        self.bot.settings.chat_id = 99999
+
+    async def asyncTearDown(self):
+        await self.client.aclose()
+
+    async def test_notify_host_started(self):
+        """Verifies notify_host_started posts message and refreshes dashboard."""
+        self.bot.settings.notify_host_start = True
+        await self.bot.notify_host_started("Alex")
+
+        send_calls = [c for c in self.transport.calls if "sendMessage" in c["url"]]
+        self.assertGreaterEqual(len(send_calls), 1)
+        sent_text = send_calls[0]["json"]["text"]
+        self.assertIn("[СЕРВЕР]", sent_text)
+        self.assertIn("Alex", sent_text)
+        self.assertIn("запустил игру", sent_text)
+
+        # Suppression test
+        self.transport.calls.clear()
+        self.bot.settings.notify_host_start = False
+        await self.bot.notify_host_started("Alex")
+        # Should not send message, but update dashboard
+        send_msg_calls = [c for c in self.transport.calls if "sendMessage" in c["url"] and "[СЕРВЕР]" in c["json"].get("text", "")]
+        self.assertEqual(len(send_msg_calls), 0)
+
+    async def test_notify_guest_joined_and_left(self):
+        """Verifies notify_guest_joined and notify_guest_left dispatchers."""
+        self.bot.settings.notify_guest_join = True
+        self.bot.settings.notify_guest_leave = True
+
+        await self.bot.notify_guest_joined("Bob")
+        join_calls = [c for c in self.transport.calls if "sendMessage" in c["url"] and "подключился" in c["json"].get("text", "")]
+        self.assertEqual(len(join_calls), 1)
+        self.assertIn("Bob", join_calls[0]["json"]["text"])
+
+        await self.bot.notify_guest_left("Bob")
+        leave_calls = [c for c in self.transport.calls if "sendMessage" in c["url"] and "покинул" in c["json"].get("text", "")]
+        self.assertEqual(len(leave_calls), 1)
+        self.assertIn("Bob", leave_calls[0]["json"]["text"])
+
+    async def test_notify_rolling_save_saved(self):
+        """Verifies notify_rolling_save_saved dispatches formatted autosave alerts."""
+        self.bot.settings.notify_rolling_save = True
+        await self.bot.notify_rolling_save_saved(version=5, size_mb=12.4, uploaded_by="Charlie")
+
+        save_calls = [c for c in self.transport.calls if "sendMessage" in c["url"] and "[СЕЙВ]" in c["json"].get("text", "")]
+        self.assertEqual(len(save_calls), 1)
+        text = save_calls[0]["json"]["text"]
+        self.assertIn("v5", text)
+        self.assertIn("12.4 МБ", text)
+        self.assertIn("Charlie", text)
+
+    async def test_notify_session_ended(self):
+        """Verifies notify_session_ended dispatches final session summary."""
+        self.bot.settings.notify_session_end = True
+        await self.bot.notify_session_ended(
+            host_name="Alice",
+            duration_str="2 ч 15 мин",
+            version=6,
+            size_mb=14.8,
+        )
+
+        end_calls = [c for c in self.transport.calls if "sendMessage" in c["url"] and "Сессия завершена" in c["json"].get("text", "")]
+        self.assertEqual(len(end_calls), 1)
+        text = end_calls[0]["json"]["text"]
+        self.assertIn("Alice", text)
+        self.assertIn("2 ч 15 мин", text)
+        self.assertIn("v6", text)
+        self.assertIn("14.8 МБ", text)
+
+
+def _create_valid_factorio_zip(file_path: Path, marker: str = "world_v1") -> Path:
+    """Creates a valid Factorio save archive for testing."""
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(file_path, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("test_world/level.dat", f"Binary Level Data: {marker}".encode("utf-8") * 5)
+        zf.writestr("test_world/info.json", json.dumps({"name": marker, "version": "2.0"}))
+        zf.writestr("test_world/control.lua", "-- Lua script logic\n")
+    return file_path
+
+
+class TestApiTelegramHooksIntegration(unittest.TestCase):
+    """Tests FastAPI HTTP REST endpoints triggering Telegram Bot hooks."""
+
+    def setUp(self):
+        self.temp_dir = Path(tempfile.mkdtemp(prefix="test_api_tg_hooks_"))
+        self.config = ServerConfig(
+            storage_dir=self.temp_dir,
+            http_port=8088,
+            udp_stun_port=14197,
+        )
+        self.mock_tg_bot = mock.MagicMock(spec=TelegramBotService)
+        self.mock_tg_bot.is_configured = True
+        self.mock_tg_bot.update_dashboard = mock.AsyncMock()
+        self.mock_tg_bot.notify_host_started = mock.AsyncMock()
+        self.mock_tg_bot.notify_guest_joined = mock.AsyncMock()
+        self.mock_tg_bot.notify_guest_left = mock.AsyncMock()
+        self.mock_tg_bot.notify_rolling_save_saved = mock.AsyncMock()
+        self.mock_tg_bot.notify_session_ended = mock.AsyncMock()
+
+        self.app = create_app(config=self.config, telegram_bot=self.mock_tg_bot)
+        self.client = TestClient(self.app)
+
+    def test_claim_and_confirm_hosting_hooks(self):
+        """Verifies POST /claim and /confirm-hosting trigger telegram hooks."""
+        # 1. Claim host
+        res_claim = self.client.post("/claim", json={"player_name": "Alice"})
+        self.assertEqual(res_claim.status_code, 200)
+        self.assertTrue(res_claim.json()["success"])
+        token = res_claim.json()["session_token"]
+
+        self.mock_tg_bot.update_dashboard.assert_called_with(force=True)
+
+        # 2. Confirm hosting
+        res_confirm = self.client.post("/confirm-hosting", json={"session_token": token, "udp_port": 34197})
+        self.assertEqual(res_confirm.status_code, 200)
+        self.assertTrue(res_confirm.json()["success"])
+
+        self.mock_tg_bot.notify_host_started.assert_called_with("Alice")
+
+    def test_guest_register_and_deregister_hooks(self):
+        """Verifies POST /guests/register and /guests/deregister trigger telegram hooks."""
+        # Set up active hosting
+        res_claim = self.client.post("/claim", json={"player_name": "Alice"})
+        token = res_claim.json()["session_token"]
+        self.client.post("/confirm-hosting", json={"session_token": token})
+
+        # Register guest
+        res_reg = self.client.post("/guests/register", json={"guest_name": "Bob", "udp_port": 12345})
+        self.assertEqual(res_reg.status_code, 200)
+        self.mock_tg_bot.notify_guest_joined.assert_called_with("Bob")
+
+        # Deregister guest
+        res_dereg = self.client.post("/guests/deregister", json={"guest_name": "Bob"})
+        self.assertEqual(res_dereg.status_code, 200)
+        self.mock_tg_bot.notify_guest_left.assert_called_with("Bob")
+
+    def test_begin_final_upload_and_release_hooks(self):
+        """Verifies POST /begin-final-upload and /release trigger dashboard updates."""
+        res_claim = self.client.post("/claim", json={"player_name": "Alice"})
+        token = res_claim.json()["session_token"]
+        self.client.post("/confirm-hosting", json={"session_token": token})
+
+        # Begin final upload
+        res_begin = self.client.post("/begin-final-upload", json={"session_token": token})
+        self.assertEqual(res_begin.status_code, 200)
+        self.mock_tg_bot.update_dashboard.assert_called_with(force=True)
+
+        # Release host
+        res_release = self.client.post("/release", json={"session_token": token, "reason": "test_exit"})
+        self.assertEqual(res_release.status_code, 200)
+        self.mock_tg_bot.update_dashboard.assert_called_with(force=True)
+
+    def test_upload_save_hooks(self):
+        """Verifies POST /upload-save calls notify_session_ended or notify_rolling_save_saved."""
+        res_claim = self.client.post("/claim", json={"player_name": "Alice"})
+        token = res_claim.json()["session_token"]
+        self.client.post("/confirm-hosting", json={"session_token": token})
+
+        save_zip = self.temp_dir / "valid_save.zip"
+        _create_valid_factorio_zip(save_zip, marker="v1")
+
+        # 1. Rolling autosave upload (release_on_success=False)
+        with open(save_zip, "rb") as f:
+            res_rolling = self.client.post(
+                "/upload-save",
+                data={"session_token": token, "release_on_success": "false"},
+                files={"file": ("cloud_world.zip", f, "application/zip")},
+            )
+        self.assertEqual(res_rolling.status_code, 200)
+        self.mock_tg_bot.notify_rolling_save_saved.assert_called_once()
+
+        # 2. Final save upload (release_on_success=True)
+        with open(save_zip, "rb") as f:
+            res_final = self.client.post(
+                "/upload-save",
+                data={"session_token": token, "release_on_success": "true"},
+                files={"file": ("cloud_world.zip", f, "application/zip")},
+            )
+        self.assertEqual(res_final.status_code, 200)
+        self.mock_tg_bot.notify_session_ended.assert_called_once()
+
+    def test_api_fault_tolerance_when_telegram_hook_fails(self):
+        """CRITICAL: Verifies API endpoints do not crash if Telegram Bot throws network errors."""
+        self.mock_tg_bot.update_dashboard.side_effect = Exception("Telegram API Down")
+
+        res_claim = self.client.post("/claim", json={"player_name": "Alice"})
+        self.assertEqual(res_claim.status_code, 200)
+        self.assertTrue(res_claim.json()["success"])
+
+
+class TestAdminCliTelegram(unittest.TestCase):
+    """Tests for setup-telegram CLI subcommand in admin_cli.py."""
+
+    def setUp(self):
+        self.temp_dir = Path(tempfile.mkdtemp(prefix="test_admin_tg_"))
+
+    def test_setup_telegram_command_success(self):
+        """Verifies setup-telegram updates and saves settings in telegram_state.json."""
+        ret = admin_cli_main([
+            "--storage-dir", str(self.temp_dir),
+            "setup-telegram",
+            "--bot-token", "999888:TEST_TOKEN",
+            "--chat-id", "-100777888",
+            "--openrouter-key", "sk-or-cli-key",
+            "--openrouter-model", "google/gemini-2.0-flash-exp:free",
+            "--dashboard-title", "Custom Expeditions Live Hub",
+        ])
+        self.assertEqual(ret, 0)
+
+        # Verify persisted state
+        state_path = self.temp_dir / "telegram_state.json"
+        self.assertTrue(state_path.exists())
+
+        settings = TelegramBotSettings.load(state_path)
+        self.assertEqual(settings.bot_token, "999888:TEST_TOKEN")
+        self.assertEqual(settings.chat_id, -100777888)
+        self.assertEqual(settings.openrouter_api_key, "sk-or-cli-key")
+        self.assertEqual(settings.openrouter_model, "google/gemini-2.0-flash-exp:free")
+        self.assertEqual(settings.dashboard_title, "Custom Expeditions Live Hub")
+
+    def test_setup_telegram_missing_token(self):
+        """Verifies setup-telegram fails when --bot-token is missing."""
+        with self.assertRaises(SystemExit):
+            admin_cli_main([
+                "--storage-dir", str(self.temp_dir),
+                "setup-telegram",
+            ])
+
+
+class TestVpsServiceLimits(unittest.TestCase):
+    """Tests VPS systemd service memory limits and configuration."""
+
+    def test_vps_service_limits(self):
+        """Verifies memory limits in deploy/vps/factorio-hub.service are set to 96M / 128M."""
+        service_file = Path("deploy/vps/factorio-hub.service")
+        self.assertTrue(service_file.exists())
+
+        content = service_file.read_text(encoding="utf-8")
+        self.assertIn("MemoryHigh=96M", content)
+        self.assertIn("MemoryMax=128M", content)
+
+        install_file = Path("deploy/vps/install_vps.sh")
+        self.assertTrue(install_file.exists())
+        install_content = install_file.read_text(encoding="utf-8")
+        self.assertIn("128 MB", install_content)
+

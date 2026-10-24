@@ -28,6 +28,10 @@ class ServerConfig:
     udp_stun_port: int = 14197
     lease_timeout_seconds: int = 90
     require_device_auth: bool = False
+    telegram_bot_token: str = ""
+    telegram_chat_id: str = ""
+    openrouter_api_key: str = ""
+    openrouter_model: str = "google/gemini-2.0-flash-exp:free"
 
     @property
     def backups_dir(self) -> Path:
@@ -175,6 +179,11 @@ def load_server_config() -> ServerConfig:
     require_device_auth_env = os.getenv("FACTORIO_REQUIRE_DEVICE_AUTH", "false").lower()
     require_device_auth = require_device_auth_env in ("true", "1", "yes")
 
+    telegram_bot_token = os.getenv("FACTORIO_TG_BOT_TOKEN", "").strip()
+    telegram_chat_id = os.getenv("FACTORIO_TG_CHAT_ID", "").strip()
+    openrouter_api_key = os.getenv("FACTORIO_OPENROUTER_API_KEY", "").strip()
+    openrouter_model = os.getenv("FACTORIO_OPENROUTER_MODEL", "google/gemini-2.0-flash-exp:free").strip()
+
     config = ServerConfig(
         storage_dir=storage_path,
         current_save_filename=os.getenv("FACTORIO_CURRENT_SAVE_FILENAME", "cloud_world.zip"),
@@ -186,6 +195,10 @@ def load_server_config() -> ServerConfig:
         udp_stun_port=udp_stun_port,
         lease_timeout_seconds=lease_timeout,
         require_device_auth=require_device_auth,
+        telegram_bot_token=telegram_bot_token,
+        telegram_chat_id=telegram_chat_id,
+        openrouter_api_key=openrouter_api_key,
+        openrouter_model=openrouter_model,
     )
 
     config.validate()

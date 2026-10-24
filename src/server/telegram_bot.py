@@ -516,6 +516,131 @@ class TelegramBotService:
             return False
 
     # --------------------------------------------------------------------------
+    # Event Notification Dispatchers
+    # --------------------------------------------------------------------------
+
+    async def notify_host_started(self, host_name: str) -> None:
+        """
+        Sends an alert when a host starts hosting the game and forces dashboard refresh.
+
+        Args:
+            host_name: Nickname of the host player.
+        """
+        if not self.is_configured:
+            return
+
+        try:
+            if self.settings.notify_host_start:
+                text = f"<b>[СЕРВЕР]</b> Игрок <b>{html.escape(host_name)}</b> запустил игру!"
+                await self.send_message(text=text)
+            await self.update_dashboard(force=True)
+        except Exception as exc:
+            logger.error("Error in notify_host_started: %s", exc)
+
+    async def notify_guest_joined(self, guest_name: str) -> None:
+        """
+        Sends an alert when a guest connects to the multiplayer session and refreshes dashboard.
+
+        Args:
+            guest_name: Nickname of the connecting guest player.
+        """
+        if not self.is_configured:
+            return
+
+        try:
+            if self.settings.notify_guest_join:
+                text = f"<b>[СЕРВЕР]</b> Игрок <b>{html.escape(guest_name)}</b> подключился к игре."
+                await self.send_message(text=text)
+            await self.update_dashboard(force=True)
+        except Exception as exc:
+            logger.error("Error in notify_guest_joined: %s", exc)
+
+    async def notify_guest_left(self, guest_name: str) -> None:
+        """
+        Sends an alert when a guest disconnects from the multiplayer session and refreshes dashboard.
+
+        Args:
+            guest_name: Nickname of the leaving guest player.
+        """
+        if not self.is_configured:
+            return
+
+        try:
+            if self.settings.notify_guest_leave:
+                text = f"<b>[СЕРВЕР]</b> Игрок <b>{html.escape(guest_name)}</b> покинул игру."
+                await self.send_message(text=text)
+            await self.update_dashboard(force=True)
+        except Exception as exc:
+            logger.error("Error in notify_guest_left: %s", exc)
+
+    async def notify_rolling_save_saved(
+        self,
+        version: int,
+        size_mb: float,
+        uploaded_by: str,
+    ) -> None:
+        """
+        Sends an alert when an intermediate autosave is backed up to the cloud safe.
+
+        Args:
+            version: Save file increment version.
+            size_mb: Save archive size in megabytes.
+            uploaded_by: Player who uploaded the save.
+        """
+        if not self.is_configured:
+            return
+
+        try:
+            if self.settings.notify_rolling_save:
+                text = (
+                    f"<b>[СЕЙВ]</b> Автосейв v{version} ({size_mb:.1f} МБ) сохранен в сейф.\n"
+                    f"Игрок: <b>{html.escape(uploaded_by)}</b>"
+                )
+                await self.send_message(text=text)
+            await self.update_dashboard(force=True)
+        except Exception as exc:
+            logger.error("Error in notify_rolling_save_saved: %s", exc)
+
+    async def notify_session_ended(
+        self,
+        host_name: Optional[str] = None,
+        duration_str: Optional[str] = None,
+        version: Optional[int] = None,
+        size_mb: Optional[float] = None,
+    ) -> None:
+        """
+        Sends an alert when a multiplayer session ends and the final world save is archived.
+
+        Args:
+            host_name: Nickname of the host player.
+            duration_str: Formatted string representing session duration (e.g. '1 ч 20 мин').
+            version: Save file increment version.
+            size_mb: Save archive size in megabytes.
+        """
+        if not self.is_configured:
+            return
+
+        try:
+            if self.settings.notify_session_end:
+                details = []
+                if host_name:
+                    details.append(f"Хост: <b>{html.escape(host_name)}</b>")
+                if duration_str:
+                    details.append(f"Время в игре: {duration_str}")
+                if version is not None and size_mb is not None:
+                    details.append(f"Финальный мир: v{version} ({size_mb:.1f} МБ)")
+
+                body_lines = "\n".join(details)
+                text = (
+                    f"<b>[СЕРВЕР]</b> Сессия завершена. Мир успешно выгружен в сейф.\n"
+                    f"{body_lines}"
+                )
+                await self.send_message(text=text)
+            await self.update_dashboard(force=True)
+        except Exception as exc:
+            logger.error("Error in notify_session_ended: %s", exc)
+
+    # --------------------------------------------------------------------------
     # Pinned Live Dashboard
     # --------------------------------------------------------------------------
 
@@ -1067,6 +1192,10 @@ class TelegramBotService:
         )
         logger.info("Telegram Bot long-polling and dashboard timer started.")
 
+    async def start(self) -> None:
+        """Convenience alias for start_polling."""
+        await self.start_polling()
+
     async def stop_polling(self) -> None:
         """Cancels and awaits termination of polling and timer tasks."""
         self._is_polling = False
@@ -1087,6 +1216,10 @@ class TelegramBotService:
             self._dashboard_timer_task = None
 
         logger.info("Telegram Bot long-polling stopped.")
+
+    async def stop(self) -> None:
+        """Convenience alias for stop_polling."""
+        await self.stop_polling()
 
     async def _polling_loop(self) -> None:
         """Continuous long-polling loop retrieving updates via getUpdates."""

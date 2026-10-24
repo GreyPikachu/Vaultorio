@@ -182,7 +182,7 @@ if (( HEALTH_OK == 1 )); then
     echo "HTTP API:        http://0.0.0.0:${HTTP_PORT}"
     echo "UDP STUN:        0.0.0.0:${UDP_STUN_PORT}"
     echo "Data Path:       ${DATA_DIR}"
-    echo "Memory Limit:    64 MB (strictly enforced by systemd cgroups)"
+    echo "Memory Limit:    128 MB (strictly enforced by systemd cgroups)"
     echo "=========================================================================="
 else
     log_err "Health check timed out after ${MAX_ATTEMPTS} seconds. Inspecting logs:"

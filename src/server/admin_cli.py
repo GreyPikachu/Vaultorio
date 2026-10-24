@@ -20,6 +20,7 @@ from typing import List, Optional
 from src.common.invite_codec import encode_invite_code
 from src.server.auth_manager import AuthManager
 from src.server.config import ServerConfig, load_server_config
+from src.server.telegram_bot import TelegramBotSettings
 
 logger = logging.getLogger("admin_cli")
 
@@ -260,6 +261,57 @@ def handle_cleanup(args: argparse.Namespace) -> int:
         return 1
 
 
+def handle_setup_telegram(args: argparse.Namespace) -> int:
+    """Обрабатывает команду setup-telegram для привязки Telegram-бота."""
+    try:
+        config = _get_server_config(args.config, args.storage_dir)
+        settings = TelegramBotSettings.load(config.telegram_state_path)
+
+        bot_token = (args.bot_token or "").strip()
+        if not bot_token:
+            sys.stderr.write("Ошибка: Токен Telegram-бота (--bot-token) не может быть пустым.\n")
+            return 1
+        settings.bot_token = bot_token
+
+        if args.chat_id is not None and str(args.chat_id).strip():
+            raw_chat = str(args.chat_id).strip()
+            try:
+                settings.chat_id = int(raw_chat)
+            except ValueError:
+                settings.chat_id = raw_chat
+
+        if args.openrouter_key is not None:
+            settings.openrouter_api_key = args.openrouter_key.strip()
+
+        if args.openrouter_model is not None and args.openrouter_model.strip():
+            settings.openrouter_model = args.openrouter_model.strip()
+
+        if args.dashboard_title is not None and args.dashboard_title.strip():
+            settings.dashboard_title = args.dashboard_title.strip()
+
+        settings.enabled = True
+        settings.save(config.telegram_state_path)
+
+        masked_token = f"{bot_token[:6]}...{bot_token[-4:]}" if len(bot_token) > 10 else "***"
+        sys.stdout.write("Успех: Настройки Telegram-бота сохранены.\n")
+        sys.stdout.write(f"Файл состояния: {config.telegram_state_path}\n")
+        sys.stdout.write(f"Токен бота: {masked_token}\n")
+        if settings.chat_id:
+            sys.stdout.write(f"ID чата: {settings.chat_id}\n")
+        else:
+            sys.stdout.write("ID чата: Не привязан. Добавьте бота в группу друзей и отправьте команду /setup в чате.\n")
+
+        if settings.openrouter_api_key:
+            masked_key = f"{settings.openrouter_api_key[:6]}...{settings.openrouter_api_key[-4:]}"
+            sys.stdout.write(f"Ключ OpenRouter: {masked_key} (модель: {settings.openrouter_model})\n")
+
+        return 0
+
+    except Exception as exc:
+        sys.stderr.write(f"Ошибка при настройке Telegram-бота: {exc}\n")
+        return 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Формирует и настраивает парсер аргументов командной строки."""
     parser = argparse.ArgumentParser(
@@ -302,6 +354,17 @@ def build_parser() -> argparse.ArgumentParser:
     cleanup_parser = subparsers.add_parser("cleanup", help="Очистить устаревшие и исчерпанные билеты.")
     cleanup_parser.add_argument("--days", type=int, default=7, help="Удалять инвайты старше N дней (по умолчанию 7).")
 
+    # 5. setup-telegram
+    tg_parser = subparsers.add_parser(
+        "setup-telegram",
+        help="Настроить Telegram-бота, закрепленный дашборд и ключ OpenRouter.",
+    )
+    tg_parser.add_argument("--bot-token", required=True, type=str, help="Токен бота от @BotFather.")
+    tg_parser.add_argument("--chat-id", type=str, default=None, help="ID группы/чата для уведомлений и закрепа.")
+    tg_parser.add_argument("--openrouter-key", type=str, default=None, help="API-ключ OpenRouter для Vision-хроники.")
+    tg_parser.add_argument("--openrouter-model", type=str, default=None, help="Модель OpenRouter (по умолчанию google/gemini-2.0-flash-exp:free).")
+    tg_parser.add_argument("--dashboard-title", type=str, default=None, help="Заголовок закрепленного дашборда.")
+
     return parser
 
 
@@ -318,6 +381,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         return handle_revoke(args)
     elif args.command == "cleanup":
         return handle_cleanup(args)
+    elif args.command == "setup-telegram":
+        return handle_setup_telegram(args)
     else:
         parser.print_help()
         return 1

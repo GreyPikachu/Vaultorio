@@ -6,9 +6,11 @@ and mod manifest synchronization on port 8088/tcp.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import secrets
+import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -46,13 +48,14 @@ from src.server.schemas import (
 )
 from src.server.session_manager import SessionLockManager
 from src.server.storage import InvalidSaveArchiveError, SaveStorageManager, StorageError
+from src.server.telegram_bot import TelegramBotService
 
 logger = get_logger("api")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Manages background UDP STUN Coordinator lifecycle alongside HTTP server."""
+    """Manages background UDP STUN Coordinator and Telegram Bot lifecycle alongside HTTP server."""
     stun_transport = None
     stun_protocol = None
 
@@ -74,6 +77,15 @@ async def lifespan(app: FastAPI):
         except Exception as exc:
             logger.warning("Could not start UDP STUN Coordinator in lifespan: %s", exc)
 
+    # Launch Telegram Bot background tasks if configured
+    tg_bot: Optional[TelegramBotService] = getattr(app.state, "telegram_bot", None)
+    if tg_bot and tg_bot.is_configured:
+        try:
+            await tg_bot.start()
+            logger.info("Telegram Bot Service started in lifespan")
+        except Exception as exc:
+            logger.warning("Could not start Telegram Bot in lifespan: %s", exc)
+
     yield
 
     if stun_transport:
@@ -82,6 +94,14 @@ async def lifespan(app: FastAPI):
             logger.info("UDP STUN Coordinator transport closed")
         except Exception as exc:
             logger.warning("Error closing UDP STUN transport: %s", exc)
+
+    if tg_bot:
+        try:
+            await tg_bot.stop()
+            await tg_bot.close()
+            logger.info("Telegram Bot Service stopped and closed in lifespan")
+        except Exception as exc:
+            logger.warning("Error closing Telegram Bot Service in lifespan: %s", exc)
 
 
 def get_client_ip(request: Request) -> str:
@@ -110,6 +130,7 @@ def create_app(
     session_manager: Optional[SessionLockManager] = None,
     auth_manager: Optional[AuthManager] = None,
     enable_stun: bool = False,
+    telegram_bot: Optional[TelegramBotService] = None,
 ) -> FastAPI:
     """
     Application factory for the Factorio Safe HTTP API.
@@ -120,6 +141,7 @@ def create_app(
         session_manager: Optional SessionLockManager instance.
         auth_manager: Optional AuthManager instance for device token verification.
         enable_stun: If True, automatically launches UDP STUN Coordinator in lifespan.
+        telegram_bot: Optional TelegramBotService instance for status notifications.
 
     Returns:
         FastAPI: Fully configured ASGI application.
@@ -128,6 +150,12 @@ def create_app(
     app_storage = storage or SaveStorageManager(app_config)
     app_session = session_manager or SessionLockManager(app_config)
     app_auth = auth_manager or AuthManager(app_config)
+    app_telegram = telegram_bot or TelegramBotService(
+        config=app_config,
+        session_manager=app_session,
+        storage_manager=app_storage,
+        auth_manager=app_auth,
+    )
 
     app = FastAPI(
         title="Factorio P2P Safe & Coordinator API",
@@ -142,6 +170,15 @@ def create_app(
     app.state.session_manager = app_session
     app.state.auth_manager = app_auth
     app.state.enable_stun = enable_stun
+    app.state.telegram_bot = app_telegram
+
+    def _dispatch_tg_hook(coro: Any) -> None:
+        """Dispatches an asynchronous Telegram bot event task without blocking HTTP response."""
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(coro)
+        except Exception as hook_err:
+            logger.debug("Failed to dispatch telegram hook: %s", hook_err)
 
     @app.middleware("http")
     async def upload_activity_touch_middleware(request: Request, call_next: Any) -> Response:
@@ -275,6 +312,7 @@ def create_app(
                 # already_hosted or uploading_final return 200 with success=False to allow client to inspect retry_after
                 return JSONResponse(status_code=200, content=result)
 
+            _dispatch_tg_hook(app_telegram.update_dashboard(force=True))
             return JSONResponse(status_code=200, content=result)
         except Exception as exc:
             logger.error("Error during claim_host for '%s': %s", req.player_name, exc, exc_info=True)
@@ -299,6 +337,8 @@ def create_app(
                     return JSONResponse(status_code=409, content=result)
                 return JSONResponse(status_code=400, content=result)
 
+            host_name = result.get("status", {}).get("host_name") or "Хост"
+            _dispatch_tg_hook(app_telegram.notify_host_started(host_name))
             return JSONResponse(status_code=200, content=result)
         except Exception as exc:
             logger.error("Error during confirm_hosting: %s", exc, exc_info=True)
@@ -342,6 +382,7 @@ def create_app(
                     return JSONResponse(status_code=403, content=result)
                 return JSONResponse(status_code=400, content=result)
 
+            _dispatch_tg_hook(app_telegram.update_dashboard(force=True))
             return JSONResponse(status_code=200, content=result)
         except Exception as exc:
             logger.error("Error during begin_final_upload: %s", exc, exc_info=True)
@@ -360,6 +401,7 @@ def create_app(
                     return JSONResponse(status_code=403, content=result)
                 return JSONResponse(status_code=400, content=result)
 
+            _dispatch_tg_hook(app_telegram.update_dashboard(force=True))
             return JSONResponse(status_code=200, content=result)
         except Exception as exc:
             logger.error("Error during release_host: %s", exc, exc_info=True)
@@ -377,6 +419,8 @@ def create_app(
                 guest_public_ip=client_ip,
                 guest_udp_port=req.udp_port,
             )
+            if result.get("success"):
+                _dispatch_tg_hook(app_telegram.notify_guest_joined(req.guest_name))
             return JSONResponse(status_code=200, content=result)
         except Exception as exc:
             logger.error("Error during register_guest: %s", exc, exc_info=True)
@@ -389,6 +433,8 @@ def create_app(
         """
         try:
             result = app_session.deregister_guest(guest_name=req.guest_name)
+            if result.get("success"):
+                _dispatch_tg_hook(app_telegram.notify_guest_left(req.guest_name))
             return JSONResponse(status_code=200, content=result)
         except Exception as exc:
             logger.error("Error during deregister_guest: %s", exc, exc_info=True)
@@ -549,9 +595,33 @@ def create_app(
             logger.error("Unexpected error committing save: %s", exc, exc_info=True)
             return JSONResponse(status_code=500, content={"error": "commit_failed", "message": str(exc)})
 
-        # 7. Release host slot if requested
+        # 7. Release host slot if requested and trigger Telegram notifications
+        session_status = app_session.get_public_status()
+        version = save_result.get("version", 1)
+        size_mb = save_result.get("size_bytes", 0) / (1024 * 1024)
+
         if release_on_success:
+            duration_str = None
+            started_at = session_status.get("started_at")
+            if started_at:
+                elapsed = max(0, int(time.time() - started_at))
+                h = elapsed // 3600
+                m = (elapsed % 3600) // 60
+                duration_str = f"{h} ч {m} мин"
+
             app_session.release_host(effective_token, reason="final_save_uploaded")
+            _dispatch_tg_hook(app_telegram.notify_session_ended(
+                host_name=session_status.get("host_name") or host_name,
+                duration_str=duration_str,
+                version=version,
+                size_mb=size_mb,
+            ))
+        else:
+            _dispatch_tg_hook(app_telegram.notify_rolling_save_saved(
+                version=version,
+                size_mb=size_mb,
+                uploaded_by=host_name,
+            ))
 
         return JSONResponse(
             status_code=200,

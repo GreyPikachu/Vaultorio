@@ -60,8 +60,8 @@ class TestDeployVPS(unittest.TestCase):
 
         # 1. Cgroup memory limits
         self.assertIn("MemoryAccounting=true", content)
-        self.assertIn("MemoryHigh=48M", content)
-        self.assertIn("MemoryMax=64M", content)
+        self.assertIn("MemoryHigh=96M", content)
+        self.assertIn("MemoryMax=128M", content)
         self.assertIn("CPUQuota=15%", content)
 
         # 2. Worker constraint: strictly single worker for shared in-memory session and STUN socket
