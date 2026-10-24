@@ -64,6 +64,7 @@ def build_wrapper(
         "--hidden-import", "src.client.session_orchestrator",
         "--hidden-import", "src.client.setup_gui",
         "--hidden-import", "src.client.ui_notifier",
+        "--hidden-import", "src.client.shift_detector",
         "--hidden-import", "tkinter",
         "--hidden-import", "tkinter.ttk",
         "--hidden-import", "tkinter.filedialog",
