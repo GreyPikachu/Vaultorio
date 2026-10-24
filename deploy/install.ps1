@@ -44,7 +44,7 @@ if ($steamPath) {
 
 $foundGame = $null
 foreach ($candidate in $gameCandidates) {
-    if (Test-Path "$candidate\bin\x64\factorio.exe" -or Test-Path "$candidate\bin\x64\factorio_core.exe") {
+    if ((Test-Path "$candidate\bin\x64\factorio.exe") -or (Test-Path "$candidate\bin\x64\factorio_core.exe")) {
         $foundGame = $candidate
         break
     }
@@ -53,7 +53,7 @@ foreach ($candidate in $gameCandidates) {
 if (-not $foundGame) {
     Write-Host "Игра не найдена в стандартных путях." -ForegroundColor Yellow
     $userInput = Read-Host "Введите полный путь к папке игры Factorio (где лежит bin\x64)"
-    if ($userInput -and (Test-Path "$userInput\bin\x64\factorio.exe" -or Test-Path "$userInput\bin\x64\factorio_core.exe")) {
+    if ($userInput -and ((Test-Path "$userInput\bin\x64\factorio.exe") -or (Test-Path "$userInput\bin\x64\factorio_core.exe"))) {
         $foundGame = $userInput
     } else {
         Write-Host "ОШИБКА: Исполняемый файл factorio.exe не найден в указанном пути: $userInput" -ForegroundColor Red
