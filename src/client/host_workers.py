@@ -512,6 +512,7 @@ class AutosaveWatcher:
 
         # Копируем файл во временный staging-файл, чтобы избежать чтения в момент дозаписи игрой
         staging_dir = self.saves_dir / ".cloud_stash"
+        staging_file: Optional[Path] = None
         try:
             staging_dir.mkdir(parents=True, exist_ok=True)
             staging_file = staging_dir / f"_staging_{int(time.time())}.zip"
@@ -519,10 +520,6 @@ class AutosaveWatcher:
 
             if not zipfile.is_zipfile(staging_file):
                 logger.warning(f"Staging-файл {staging_file} поврежден или недописан, отмена отправки")
-                try:
-                    staging_file.unlink(missing_ok=True)
-                except OSError:
-                    pass
                 return False
 
             staging_sha = compute_file_sha256(staging_file)
@@ -540,15 +537,16 @@ class AutosaveWatcher:
                 self.last_uploaded_sha256 = staging_sha
                 self.last_upload_time = time.time()
 
-            try:
-                staging_file.unlink(missing_ok=True)
-            except OSError:
-                pass
-
             return True
         except Exception as err:
             logger.error(f"Ошибка фоновой выгрузки автосейва {latest_save.name}: {err}")
             return False
+        finally:
+            if staging_file and staging_file.exists():
+                try:
+                    staging_file.unlink(missing_ok=True)
+                except OSError:
+                    pass
 
     def start(self) -> None:
         """Запускает фоновый поток мониторинга автосейвов."""

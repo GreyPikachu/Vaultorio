@@ -252,6 +252,9 @@ class FactorioEnvironment:
             if not entry.is_file():
                 continue
             name_l = entry.name.lower()
+            if name_l.startswith("_staging_"):
+                entry.unlink(missing_ok=True)
+                continue
             if name_l.startswith("_autosave") or name_l.startswith("cloud_world_prev"):
                 try:
                     os.replace(entry, self.cloud_stash_dir / entry.name)
@@ -334,7 +337,7 @@ class FactorioEnvironment:
                     continue
                 if name_lower.startswith("."):
                     continue
-                if name_lower.startswith("_autosave"):
+                if name_lower.startswith("_autosave") or name_lower.startswith("_staging_"):
                     continue
                 if ".tmp" in name_lower or name_lower.endswith(".part"):
                     continue

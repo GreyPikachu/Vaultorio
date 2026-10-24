@@ -607,7 +607,10 @@ class FactorioWrapperInstaller:
             if cloud_stash_dir.exists() and cloud_stash_dir.is_dir():
                 try:
                     for f in cloud_stash_dir.iterdir():
-                        shutil.move(str(f), str(env.saves_dir / f.name))
+                        if f.name.startswith("_staging_") or f.name.startswith("tmp_") or f.name.endswith(".part"):
+                            f.unlink(missing_ok=True)
+                        else:
+                            shutil.move(str(f), str(env.saves_dir / f.name))
                     cloud_stash_dir.rmdir()
                 except Exception as stash_err:
                     logger.warning(f"Ошибка при очистке .cloud_stash: {stash_err}")
