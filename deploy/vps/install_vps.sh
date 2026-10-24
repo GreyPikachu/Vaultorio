@@ -104,10 +104,12 @@ log_info "Synchronizing application source files..."
 if [[ -d "${REPO_ROOT}/src/server" ]]; then
     mkdir -p "${INSTALL_DIR}/src"
     cp -r "${REPO_ROOT}/src/server" "${INSTALL_DIR}/src/"
+    cp -r "${REPO_ROOT}/src/common" "${INSTALL_DIR}/src/"
     cp "${REPO_ROOT}/deploy/vps/requirements.txt" "${INSTALL_DIR}/"
     cp "${REPO_ROOT}/deploy/vps/factorio-hub.service" "${INSTALL_DIR}/"
 elif [[ -f "${SCRIPT_DIR}/requirements.txt" ]]; then
     cp -r "${SCRIPT_DIR}/../../src/server" "${INSTALL_DIR}/src/" 2>/dev/null || true
+    cp -r "${SCRIPT_DIR}/../../src/common" "${INSTALL_DIR}/src/" 2>/dev/null || true
     cp "${SCRIPT_DIR}/requirements.txt" "${INSTALL_DIR}/"
     cp "${SCRIPT_DIR}/factorio-hub.service" "${INSTALL_DIR}/"
 fi

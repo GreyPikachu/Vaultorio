@@ -14,6 +14,9 @@ from src.server.logger import get_logger, setup_server_logging
 
 logger = get_logger("main")
 
+# Default ASGI application instance for uvicorn (e.g. uvicorn src.server.main:app)
+app = create_app(enable_stun=True)
+
 
 def main() -> None:
     """Initializes logging, configuration, and launches the uvicorn web server."""
