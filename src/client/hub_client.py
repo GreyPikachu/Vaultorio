@@ -835,6 +835,70 @@ class HubClient:
                 raise
             raise RuntimeError(f"Сетевая ошибка при удалении мира с сервера: {e}") from e
 
+    # =========================================================================
+    # Раздел 6: Отправка отчетов хроники и скриншотов на сервер
+    # =========================================================================
+
+    def send_chronicle_report(
+        self,
+        events: list[dict[str, Any]],
+        trigger_type: str = "hourly_summary",
+        screenshot_path: Optional[Path | str] = None,
+        session_token: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Отправляет пачку событий хроники и опциональный скриншот на сервер (POST /chronicle/report).
+
+        Args:
+            events: Список словарей событий игрового процесса.
+            trigger_type: Тип триггера ('important_event', 'hourly_summary', 'session_summary').
+            screenshot_path: Опциональный путь к файлу изображения (JPEG/PNG).
+            session_token: Опциональный токен активной сессии хоста.
+
+        Returns:
+            Словарь с результатом отправки от сервера или {"success": False, "error": str(err)}.
+        """
+        try:
+            data: dict[str, Any] = {
+                "events_json": json.dumps(events, ensure_ascii=False),
+                "trigger_type": trigger_type,
+            }
+            if session_token:
+                data["session_token"] = session_token
+
+            files = None
+            opened_file = None
+            if screenshot_path:
+                shot_p = Path(screenshot_path).resolve()
+                if shot_p.is_file():
+                    opened_file = shot_p.open("rb")
+                    mime = "image/png" if shot_p.suffix.lower() == ".png" else "image/jpeg"
+                    files = {"screenshot": (shot_p.name, opened_file, mime)}
+                else:
+                    logger.debug(f"Файл скриншота не найден по пути: {shot_p}")
+
+            try:
+                resp = self._client.post(
+                    "/chronicle/report",
+                    data=data,
+                    files=files,
+                    timeout=self.timeout,
+                )
+                resp.raise_for_status()
+                try:
+                    return resp.json()
+                except Exception:
+                    return {"success": True, "status_code": resp.status_code}
+            finally:
+                if opened_file:
+                    opened_file.close()
+        except Exception as err:
+            logger.warning(f"Ошибка при отправке отчета хроники (/chronicle/report): {err}")
+            return {"success": False, "error": str(err)}
+
+    # =========================================================================
+    # Раздел 7: Активация Кода Дружбы и создание конфигурации
+    # =========================================================================
+
     @classmethod
     def activate_with_invite_code(
         cls,

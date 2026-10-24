@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Callable
 
 from src.client.hub_client import HubClient, compute_file_sha256
+from src.client.chronicle_watcher import ChronicleWatcher
 
 logger = logging.getLogger("factorio_hub.host_workers")
 
@@ -723,9 +724,11 @@ class HostWorkersManager:
         mod_list: list[dict] | None = None,
         target_save_name: str = "cloud_world.zip",
         on_non_cloud_game: Callable[[str], None] | None = None,
+        script_output_dir: Path | str | None = None,
     ) -> None:
         self.log_path = Path(log_path)
         self.saves_dir = Path(saves_dir)
+        self.script_output_dir = Path(script_output_dir) if script_output_dir is not None else self.saves_dir.parent / "script-output"
         self.hub_client = hub_client
         self.session_token = session_token
         self.session_start_time = float(session_start_time if session_start_time is not None else time.time())
@@ -747,6 +750,10 @@ class HostWorkersManager:
                 self.autosave_watcher.stop()
             except Exception as e:
                 logger.warning(f"Ошибка остановки AutosaveWatcher: {e}")
+            try:
+                self.chronicle_watcher.stop()
+            except Exception as e:
+                logger.warning(f"Ошибка остановки ChronicleWatcher: {e}")
             if self.user_on_non_cloud_game:
                 try:
                     self.user_on_non_cloud_game(map_name)
@@ -786,12 +793,21 @@ class HostWorkersManager:
             target_save_name=self.target_save_name,
         )
 
+        self.chronicle_watcher = ChronicleWatcher(
+            script_output_dir=self.script_output_dir,
+            hub_client=self.hub_client,
+            session_token=self.session_token,
+            log_path=self.log_path,
+            is_confirmed_getter=lambda: self.detector.is_confirmed and not self.detector.is_non_cloud_game,
+        )
+
     def start(self) -> None:
         """Запускает все рабочие потоки."""
         logger.info("Запуск всех фоновых потоков Хоста (HostWorkersManager)...")
         self.detector.start()
         self.heartbeat.start()
         self.autosave_watcher.start()
+        self.chronicle_watcher.start()
 
     def stop(self) -> None:
         """Останавливает все рабочие потоки."""
@@ -799,6 +815,7 @@ class HostWorkersManager:
         self.detector.stop()
         self.heartbeat.stop()
         self.autosave_watcher.stop()
+        self.chronicle_watcher.stop()
 
     def on_game_exit(self) -> dict:
         """Обработчик закрытия игрового процесса Factorio."""
@@ -806,6 +823,13 @@ class HostWorkersManager:
         is_confirmed = self.detector.is_confirmed
         is_non_cloud = self.detector.is_non_cloud_game
         loaded_map = self.detector.loaded_map_name
+
+        if is_confirmed and not is_non_cloud:
+            try:
+                self.chronicle_watcher.flush_on_exit()
+            except Exception as chr_err:
+                logger.warning(f"Ошибка отправки финальной хроники при выходе: {chr_err}")
+
         self.stop()
         return flush_final_save_on_exit(
             saves_dir=self.saves_dir,

@@ -10,6 +10,8 @@
 """
 
 from src.client.config import ClientConfig
+from src.client.chronicle_mod import ensure_chronicle_mod_installed
+from src.client.chronicle_watcher import ChronicleWatcher
 from src.client.factorio_env import FactorioEnvironment
 from src.client.factorio_wrapper import main, setup_client_logging
 from src.client.host_workers import (
@@ -39,6 +41,7 @@ from src.client.ui_notifier import copy_to_clipboard, show_role_banner
 
 __all__ = [
     "AutosaveWatcher",
+    "ChronicleWatcher",
     "ClientConfig",
     "FactorioEnvironment",
     "FirstRunSetupWindow",
@@ -55,6 +58,7 @@ __all__ = [
     "copy_to_clipboard",
     "decode_control_packet",
     "encode_control_packet",
+    "ensure_chronicle_mod_installed",
     "find_latest_session_save",
     "flush_final_save_on_exit",
     "format_data_packet",

@@ -34,6 +34,7 @@ from src.client.factorio_env import FactorioEnvironment
 from src.client.host_workers import HostWorkersManager
 from src.client.hub_client import HubClient
 from src.client.p2p_tunnel import GuestP2PProxy, HostP2PBridge
+from src.client.chronicle_mod import ensure_chronicle_mod_installed
 from src.client.shift_detector import is_shift_key_pressed
 from src.client.ui_notifier import copy_to_clipboard, show_role_banner
 
@@ -653,7 +654,7 @@ class SessionOrchestrator:
                     )
                     self.host_bridge.start()
 
-                    # Запуск HostWorkersManager (LobbyDetector, Heartbeat, AutosaveWatcher)
+                    # Запуск HostWorkersManager (LobbyDetector, Heartbeat, AutosaveWatcher, ChronicleWatcher)
                     self.host_workers = HostWorkersManager(
                         log_path=self.env.log_file_path,
                         saves_dir=self.env.saves_dir,
@@ -662,6 +663,7 @@ class SessionOrchestrator:
                         factorio_port=self.config.host_factorio_port,
                         mod_list=self.env.get_active_mods_manifest(),
                         target_save_name=self.env.cloud_save_name,
+                        script_output_dir=self.env.script_output_dir,
                     )
                     self.host_workers.start()
 
@@ -730,6 +732,12 @@ class SessionOrchestrator:
         game_args: Optional[List[str]] = None,
     ) -> subprocess.Popen:
         """Запускает процесс игры Factorio с переданными аргументами."""
+        # Установка/проверка микро-мода хроники перед стартом движка игры
+        try:
+            ensure_chronicle_mod_installed(self.env.mods_dir)
+        except Exception as chr_mod_err:
+            logger.warning(f"Ошибка автоустановки микро-мода хроники: {chr_mod_err}")
+
         core_bin = self.locate_core_executable(executable_path)
         cmd = [str(core_bin), *(game_args or [])]
         logger.info(f"Запуск процесса Factorio: {' '.join(cmd)}")

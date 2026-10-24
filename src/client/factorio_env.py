@@ -82,6 +82,7 @@ class FactorioEnvironment:
         self.player_data_path = self.user_data_dir / "player-data.json"
         self.adminlist_path = self.user_data_dir / "server-adminlist.json"
         self.log_file_path = self.user_data_dir / "factorio-current.log"
+        self.script_output_dir = self.user_data_dir / "script-output"
 
     @property
     def sync_config_path(self) -> Path:
@@ -102,6 +103,7 @@ class FactorioEnvironment:
             self.cloud_stash_dir.mkdir(parents=True, exist_ok=True)
             self.mods_dir.mkdir(parents=True, exist_ok=True)
             self.config_dir.mkdir(parents=True, exist_ok=True)
+            self.script_output_dir.mkdir(parents=True, exist_ok=True)
             logger.debug(f"Директории проверены/созданы в {self.user_data_dir}")
         except Exception as e:
             logger.error(f"Ошибка при создании директорий Factorio: {e}")
