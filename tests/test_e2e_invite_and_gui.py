@@ -282,6 +282,8 @@ class TestE2EInviteAndGui(unittest.TestCase):
             "FacotryArchitecture.txt",
             "SETUP FACTORIO.txt",
             "Проблема1.txt",
+            "Новые исправления1.txt",
+            "SCR-*.png",
         ]
 
         missing = []
@@ -294,6 +296,181 @@ class TestE2EInviteAndGui(unittest.TestCase):
             [],
             f"В .gitignore отсутствуют обязательные правила исключения: {missing}",
         )
+
+    def test_e2e_phase6_complete_flow(self):
+        """Комплексная сквозная проверка Фазы 6 (Задачи 020, 021, 022).
+
+        Сценарии:
+        1. Автовосстановление ника 'graypikachu' из server-adminlist.json при заглушке 'CliPlayer'
+           и защита от перезаписи установщиком.
+        2. Проверка начального состояния FirstRunSetupWindow: сокрытие world_card, отсутствие
+           технических надписей (player-data.json / P2P-кооператив), правильный ник 'Игрок: graypikachu',
+           стили ttk.Button ('Accent.TButton' и 'Secondary.TButton').
+        3. Двухшаговый селектор: при ответе сервера save_exists=False и наличии локального сейва
+           'Судные дни.zip', окно переходит на Шаг 2 (показ world_card со стилем 'Dark.TCombobox',
+           сокрытие полей ввода).
+        4. Публикация мира на сервер и сохранение конфигурации.
+        5. Повторный запуск: при обычном старте игра запускается напрямую, а при старте по Shift
+           открывается окно настроек с опцией KEEP_CURRENT_SERVER_WORLD_OPTION.
+        """
+        import tkinter as tk
+        from tkinter import ttk
+        from src.installer.installer import FactorioWrapperInstaller
+        from src.client.setup_gui import (
+            FirstRunSetupWindow,
+            KEEP_CURRENT_SERVER_WORLD_OPTION,
+            SKIP_WORLD_UPLOAD_OPTION,
+        )
+
+        # ---------------------------------------------------------------------
+        # Сценарий 1: Защита и автовосстановление никнейма (Задача 020)
+        # ---------------------------------------------------------------------
+        self.player_data_path.write_text(
+            json.dumps({"service-username": "CliPlayer"}),
+            encoding="utf-8",
+        )
+        self.env.adminlist_path.write_text(
+            json.dumps(["graypikachu"]),
+            encoding="utf-8",
+        )
+
+        # Проверяем автоматическое восстановление ника graypikachu
+        resolved_name = self.env.resolve_or_init_player_username()
+        self.assertEqual(resolved_name, "graypikachu")
+
+        # Проверяем самоисцеление player-data.json
+        pd_data = json.loads(self.player_data_path.read_text(encoding="utf-8"))
+        self.assertEqual(pd_data.get("service-username"), "graypikachu")
+
+        # Создаем имитацию бинарников для установщика
+        game_root = self.root_path / "MockGameRoot"
+        bin_dir = game_root / "bin" / "x64"
+        bin_dir.mkdir(parents=True, exist_ok=True)
+        (bin_dir / "factorio.exe").write_bytes(b"MZ" + b"\x00" * 4096)
+        (game_root / "config-path.cfg").write_text("use-system-read-write-data-directories=false\n", encoding="utf-8")
+
+        game_env = FactorioEnvironment(custom_game_root=game_root)
+        game_env.ensure_dirs()
+        game_env.set_player_username("graypikachu", force=True)
+
+        installer = FactorioWrapperInstaller()
+        report = installer.install(
+            game_dir=game_root,
+            player_name="CliPlayer",
+            system_override="Windows",
+        )
+        self.assertEqual(report["player_name"], "graypikachu")
+        self.assertEqual(game_env.get_player_username(), "graypikachu")
+
+        # ---------------------------------------------------------------------
+        # Сценарий 2: Чистый Dark Mode и скрытый селектор на Шаге 1 (Задачи 021, 022)
+        # ---------------------------------------------------------------------
+        root = tk.Tk()
+        root.deiconify()
+        try:
+            app = FirstRunSetupWindow(
+                root=root,
+                env=self.env,
+                installer_mode=False,
+            )
+            root.update()
+
+            # Шаг 1: world_card скрыт до ввода инвайта
+            self.assertFalse(app.world_card.winfo_ismapped())
+
+            # Проверка очистки надписей от технического шума
+            self.assertEqual(app.player_name, "graypikachu")
+
+            def collect_texts(w):
+                res = []
+                for c in w.winfo_children():
+                    try:
+                        txt = c.cget("text")
+                        if txt:
+                            res.append(str(txt))
+                    except Exception:
+                        pass
+                    res.extend(collect_texts(c))
+                return res
+
+            all_texts = " ".join(collect_texts(root))
+            self.assertNotIn("(player-data.json)", all_texts)
+            self.assertNotIn("P2P-кооператив", all_texts)
+            self.assertNotIn("без белых IP", all_texts)
+            self.assertIn("Игрок: graypikachu", all_texts)
+
+            # Проверка стилей ttk.Button и движка clam
+            self.assertIsInstance(app.action_btn, ttk.Button)
+            self.assertEqual(str(app.action_btn.cget("style")), "Accent.TButton")
+            self.assertEqual(str(app.toggle_pass_btn.cget("style")), "Secondary.TButton")
+            self.assertEqual(app.style.theme_use(), "clam")
+
+            # -----------------------------------------------------------------
+            # Сценарий 3: Двухшаговый переход при пустом сервере (Задача 021)
+            # -----------------------------------------------------------------
+            # Создаем локальное сохранение
+            saves_dir = self.env.saves_dir
+            saves_dir.mkdir(parents=True, exist_ok=True)
+            test_save = saves_dir / "Судные дни.zip"
+            test_save.write_bytes(b"dummy_save_content")
+
+            mock_cfg = ClientConfig(
+                hub_http_url=self.hub_url,
+                hub_stun_host=self.stun_host,
+                hub_stun_port=self.stun_port,
+                device_token="device_token_phase6_test",
+                player_name="graypikachu",
+            )
+
+            # Имитируем успешное подключение к серверу, где мира еще нет
+            with patch("src.client.setup_gui.HubClient.activate_with_invite_code", return_value=mock_cfg), \
+                 patch.object(HubClient, "get_status", return_value={"save_exists": False}):
+                app._activate_worker("FCT1-CODE", "secret")
+                root.update()
+
+            # На Шаге 2 world_card отображается, inputs_card скрыт
+            self.assertTrue(app.world_card.winfo_ismapped())
+            self.assertFalse(app.inputs_card.winfo_ismapped())
+            self.assertIsInstance(app.world_combo, ttk.Combobox)
+            self.assertEqual(str(app.world_combo.cget("style")), "Dark.TCombobox")
+            self.assertIn("Судные дни.zip", app.world_options)
+            self.assertNotIn(KEEP_CURRENT_SERVER_WORLD_OPTION, app.world_options)
+            self.assertEqual(app.world_combo_var.get(), "Судные дни.zip")
+
+            # -----------------------------------------------------------------
+            # Сценарий 4: Публикация мира
+            # -----------------------------------------------------------------
+            with patch("src.client.setup_gui.publish_selected_world_to_server") as mock_pub:
+                mock_pub.return_value = {"published": True}
+                app.world_combo_var.set("Судные дни.zip")
+                app._publish_world_worker("Судные дни.zip", mock_cfg)
+                root.update()
+                mock_pub.assert_called_once()
+
+            self.assertEqual(app.result_config, mock_cfg)
+        finally:
+            root.destroy()
+
+        # ---------------------------------------------------------------------
+        # Сценарий 5: Повторный запуск по Shift
+        # ---------------------------------------------------------------------
+        root_shift = tk.Tk()
+        root_shift.deiconify()
+        try:
+            with patch.object(HubClient, "get_status", return_value={"save_exists": True}):
+                app_shift = FirstRunSetupWindow(
+                    root=root_shift,
+                    env=self.env,
+                    existing_config=mock_cfg,
+                )
+                root_shift.update()
+
+                self.assertTrue(app_shift.world_card.winfo_ismapped())
+                self.assertEqual(app_shift.world_options[0], KEEP_CURRENT_SERVER_WORLD_OPTION)
+                self.assertIn("Судные дни.zip", app_shift.world_options)
+                self.assertEqual(str(app_shift.world_combo.cget("style")), "Dark.TCombobox")
+        finally:
+            root_shift.destroy()
 
 
 if __name__ == "__main__":
