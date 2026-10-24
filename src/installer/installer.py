@@ -29,6 +29,7 @@ import shutil
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlparse
 
 from src.client.factorio_env import FactorioEnvironment
 
@@ -45,6 +46,10 @@ class FactorioWrapperInstaller:
         default_stun_port: int = 14197,
     ) -> None:
         self.default_hub_url = default_hub_url
+        if default_stun_host == "127.0.0.1" and default_hub_url:
+            parsed_host = urlparse(default_hub_url).hostname
+            if parsed_host and parsed_host != "127.0.0.1":
+                default_stun_host = parsed_host
         self.default_stun_host = default_stun_host
         self.default_stun_port = int(default_stun_port)
 
