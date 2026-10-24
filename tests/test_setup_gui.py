@@ -1160,5 +1160,30 @@ class TestGUISubprocessIsolationAndCleanClose(unittest.TestCase):
         _, kwargs = mock_runner.call_args
         self.assertTrue(kwargs.get("use_subprocess"))
 
+    def test_error_403_not_active_host_shows_timeout_message_instead_of_revoked_ticket(self):
+        """Проверяет дифференциацию ошибки 403 not_active_host от аннулирования билета."""
+        app = FirstRunSetupWindow(
+            root=self.root,
+            env=self.env,
+            config_path=self.tmp_path / "sync_cfg.json",
+        )
+
+        # 1. not_active_host / истечение времени сессии Хоста
+        err_timeout = PermissionError(
+            "ОТКАЗ В ВЫГРУЗКЕ (403 Forbidden - not_active_host): Защита от Split-Brain! "
+            "Сессия Хоста истекла во время передачи файла или токен не принадлежит активному Хосту."
+        )
+        app._on_activation_error(err_timeout)
+        self.root.update()
+        self.assertIn("Время ожидания загрузки на сервере истекло", app.status_lbl.cget("text"))
+        self.assertNotIn("билет аннулирован", app.status_lbl.cget("text"))
+
+        # 2. Обычный 403 Forbidden (аннулированный токен устройства)
+        err_forbidden = PermissionError("ОТКАЗ В ВЫГРУЗКЕ (403 Forbidden): Доступ запрещен сервером.")
+        app._on_activation_error(err_forbidden)
+        self.root.update()
+        self.assertIn("билет аннулирован", app.status_lbl.cget("text"))
+
+
 
 

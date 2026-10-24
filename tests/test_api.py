@@ -11,6 +11,7 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
@@ -396,6 +397,40 @@ class TestServerAPI(unittest.TestCase):
         self.assertEqual(res_get.status_code, 200)
         self.assertTrue(res_get.json()["exists"])
         self.assertEqual(res_get.json()["mod_list"], test_mods)
+
+    def test_upload_save_stream_activity_touch(self):
+        """T9.1: Tests that /upload-save calls touch_activity via middleware and chunk loop."""
+        # 1. Claim host and confirm hosting
+        res_claim = self.client.post("/claim", json={"player_name": "Alice"})
+        token = res_claim.json()["session_token"]
+        self.client.post("/confirm-hosting", json={"session_token": token})
+
+        # 2. Begin final upload
+        self.session_manager.begin_final_upload(token)
+
+        save_path = self.temp_dir / "stream_touch_save.zip"
+        self._create_valid_factorio_zip(save_path, marker="stream_touch_test")
+        sha256 = self._compute_sha256(save_path)
+
+        with patch.object(self.session_manager, "touch_activity", wraps=self.session_manager.touch_activity) as mock_touch:
+            with open(save_path, "rb") as f:
+                res = self.client.post(
+                    "/upload-save",
+                    data={
+                        "session_token": token,
+                        "release_on_success": "true",
+                    },
+                    files={"file": ("stream_touch_save.zip", f, "application/zip")},
+                    headers={
+                        "X-Expected-SHA256": sha256,
+                        "X-Session-Token": token,
+                    },
+                )
+
+        self.assertEqual(res.status_code, 200)
+        self.assertTrue(res.json()["success"])
+        # touch_activity must be called at least once (by middleware and/or chunk reader)
+        self.assertGreaterEqual(mock_touch.call_count, 1)
 
 
 if __name__ == "__main__":
