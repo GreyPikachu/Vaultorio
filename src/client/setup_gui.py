@@ -1371,7 +1371,9 @@ class FirstRunSetupWindow:
         self.action_btn.config(state="normal")
 
         err_str = str(exc)
-        if "403" in err_str or "Forbidden" in err_str:
+        if "not_active_host" in err_str or "сессия Хоста истекла" in err_str:
+            msg = "Ошибка: Время ожидания загрузки на сервере истекло. Попробуйте нажать кнопку еще раз."
+        elif "403" in err_str or "Forbidden" in err_str:
             msg = "Ошибка: Доступ запрещен сервером (возможно, билет аннулирован)."
         elif "404" in err_str or "410" in err_str or "истек" in err_str or "использован" in err_str:
             msg = "Ошибка: Код приглашения не найден, истек или уже был использован."

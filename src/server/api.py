@@ -143,6 +143,30 @@ def create_app(
     app.state.auth_manager = app_auth
     app.state.enable_stun = enable_stun
 
+    @app.middleware("http")
+    async def upload_activity_touch_middleware(request: Request, call_next: Any) -> Response:
+        """
+        Intercepts incoming network stream on /upload-save to keep the session alive.
+
+        As incoming multipart chunks arrive over the socket before or during endpoint parsing,
+        periodically updates session activity (touch_activity) so large saves never time out.
+        """
+        if request.method == "POST" and request.url.path.endswith("/upload-save"):
+            orig_receive = request._receive
+
+            async def custom_receive() -> Any:
+                msg = await orig_receive()
+                if msg.get("type") == "http.request":
+                    try:
+                        app_session.touch_activity()
+                    except Exception:
+                        pass
+                return msg
+
+            request._receive = custom_receive
+
+        return await call_next(request)
+
     async def verify_device_token(
         request: Request,
         x_device_token: Optional[str] = Header(None, alias="X-Device-Token"),
@@ -457,6 +481,10 @@ def create_app(
                     chunk = await file.read(64 * 1024)
                     if not chunk:
                         break
+                    try:
+                        app_session.touch_activity(effective_token)
+                    except Exception:
+                        pass
                     total_bytes += len(chunk)
                     if total_bytes > app_config.max_upload_size_bytes:
                         temp_path.unlink(missing_ok=True)

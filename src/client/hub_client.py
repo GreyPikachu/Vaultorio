@@ -634,7 +634,10 @@ class HubClient:
                     if mod_list_json:
                         data["mod_list_json"] = mod_list_json
 
-                    headers = {"X-Expected-SHA256": expected_sha}
+                    headers = {
+                        "X-Expected-SHA256": expected_sha,
+                        "X-Session-Token": session_token,
+                    }
 
                     resp = self._client.post(
                         "/upload-save",
@@ -644,11 +647,26 @@ class HubClient:
                     )
 
                 if resp.status_code == 403:
-                    # Защита от Split-Brain: чужая сессия, немедленно прерываем
-                    msg = (
-                        "ОТКАЗ В ВЫГРУЗКЕ (403 Forbidden): Защита от Split-Brain! "
-                        "Токен сессии недействителен или хост уже был перехвачен."
-                    )
+                    # Защита от Split-Brain: чужая сессия, либо истечение дедлайна неактивности
+                    err_code = ""
+                    err_detail = ""
+                    try:
+                        err_payload = resp.json()
+                        err_code = err_payload.get("error") or ""
+                        err_detail = err_payload.get("message") or err_payload.get("detail") or ""
+                    except Exception:
+                        err_detail = resp.text
+
+                    if err_code == "not_active_host":
+                        msg = (
+                            "ОТКАЗ В ВЫГРУЗКЕ (403 Forbidden - not_active_host): Защита от Split-Brain! "
+                            "Сессия Хоста истекла во время передачи файла или токен не принадлежит активному Хосту."
+                        )
+                    else:
+                        msg = (
+                            f"ОТКАЗ В ВЫГРУЗКЕ (403 Forbidden): Защита от Split-Brain! {err_detail or 'Доступ запрещен'}. "
+                            "Токен сессии или устройства недействителен."
+                        )
                     logger.error(msg)
                     raise PermissionError(msg)
 

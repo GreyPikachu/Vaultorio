@@ -73,7 +73,7 @@ class SessionLockManager:
     """
 
     CLAIM_TTL_SECONDS: float = 180.0
-    FINAL_UPLOAD_TTL_SECONDS: float = 45.0
+    FINAL_UPLOAD_TTL_SECONDS: float = 300.0
 
     def __init__(self, config: ServerConfig) -> None:
         """
@@ -89,6 +89,7 @@ class SessionLockManager:
         self.status_file_path: Path = self.config.storage_dir / "status.json"
         self._lock = threading.RLock()
         self._session = SessionData()
+        self._last_activity_persist: float = 0.0
 
         # Load persisted status or initialize fresh
         self._load_status_from_disk()
@@ -158,7 +159,7 @@ class SessionLockManager:
 
         # 1. Fake Host protection: claiming state expiration (180 sec)
         if state == SessionState.CLAIMING.value:
-            elapsed = now - self._session.state_changed_at
+            elapsed = now - max(self._session.state_changed_at, self._session.last_seen)
             if elapsed > self.CLAIM_TTL_SECONDS:
                 logger.warning(
                     "Fake Host protection triggered: player '%s' claimed host slot %d seconds ago "
@@ -185,9 +186,9 @@ class SessionLockManager:
                 self._persist_status_locked()
                 return True
 
-        # 3. Handover upload race protection: uploading_final timeout (45 sec)
+        # 3. Handover upload race protection: uploading_final timeout (300 sec sliding)
         elif state == SessionState.UPLOADING_FINAL.value:
-            elapsed = now - self._session.state_changed_at
+            elapsed = now - max(self._session.state_changed_at, self._session.last_seen)
             if elapsed > self.FINAL_UPLOAD_TTL_SECONDS:
                 logger.warning(
                     "Final upload timeout: host '%s' initiated final save upload %d seconds ago "
@@ -200,6 +201,38 @@ class SessionLockManager:
                 return True
 
         return False
+
+    def touch_activity(self, session_token: Optional[str] = None, persist: bool = False) -> bool:
+        """
+        Updates session activity timestamp (sliding window idle timeout).
+
+        Prevents session expiration during prolonged save uploads or data transfers
+        as long as data packets are actively arriving over the network.
+
+        Args:
+            session_token: Optional active session token to validate before touch.
+            persist: If True, immediately writes status.json to disk; otherwise throttles
+                     disk I/O to at most once every 10 seconds.
+
+        Returns:
+            bool: True if activity was successfully registered on an active session.
+        """
+        with self._lock:
+            self._check_and_expire_lease_locked()
+            if self._session.state == SessionState.IDLE.value:
+                return False
+
+            if session_token is not None and self._session.session_token != session_token:
+                return False
+
+            now = time.time()
+            self._session.last_seen = now
+
+            if persist or (now - self._last_activity_persist >= 10.0):
+                self._last_activity_persist = now
+                self._persist_status_locked()
+
+            return True
 
     def get_public_status(self) -> Dict[str, Any]:
         """
@@ -214,11 +247,11 @@ class SessionLockManager:
 
             lease_remaining = 0.0
             if self._session.state == SessionState.CLAIMING.value:
-                lease_remaining = max(0.0, self.CLAIM_TTL_SECONDS - (now - self._session.state_changed_at))
+                lease_remaining = max(0.0, self.CLAIM_TTL_SECONDS - (now - max(self._session.state_changed_at, self._session.last_seen)))
             elif self._session.state == SessionState.HOSTING_ACTIVE.value:
                 lease_remaining = max(0.0, self.lease_timeout_seconds - (now - self._session.last_seen))
             elif self._session.state == SessionState.UPLOADING_FINAL.value:
-                lease_remaining = max(0.0, self.FINAL_UPLOAD_TTL_SECONDS - (now - self._session.state_changed_at))
+                lease_remaining = max(0.0, self.FINAL_UPLOAD_TTL_SECONDS - (now - max(self._session.state_changed_at, self._session.last_seen)))
 
             return {
                 "state": self._session.state,

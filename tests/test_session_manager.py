@@ -210,7 +210,7 @@ class TestSessionLockManager(unittest.TestCase):
             self.assertIsNone(status["host_name"])
 
     def test_uploading_final_timeout_expiration(self):
-        """If final upload takes longer than 45 sec, revert to idle."""
+        """If final upload has no activity longer than FINAL_UPLOAD_TTL_SECONDS, revert to idle."""
         base_time = 1000.0
         with patch("time.time", return_value=base_time):
             claim_res = self.manager.claim_host("Alex", "198.51.100.1")
@@ -219,8 +219,35 @@ class TestSessionLockManager(unittest.TestCase):
             self.manager.begin_final_upload(token)
             self.assertEqual(self.manager._session.state, SessionState.UPLOADING_FINAL.value)
 
-        # 46 seconds later
+        # 46 seconds later: with 300s TTL, session is STILL uploading_final (large files don't abort)
         with patch("time.time", return_value=base_time + 46.0):
+            status = self.manager.get_public_status()
+            self.assertEqual(status["state"], SessionState.UPLOADING_FINAL.value)
+
+        # Exceeding full TTL without activity: reverts to idle
+        with patch("time.time", return_value=base_time + self.manager.FINAL_UPLOAD_TTL_SECONDS + 1.0):
+            status = self.manager.get_public_status()
+            self.assertEqual(status["state"], SessionState.IDLE.value)
+
+    def test_uploading_final_sliding_activity_timeout(self):
+        """Activity updates (touch_activity) extend the lease and prevent expiration."""
+        base_time = 1000.0
+        with patch("time.time", return_value=base_time):
+            claim_res = self.manager.claim_host("Alex", "198.51.100.1")
+            token = claim_res["session_token"]
+            self.manager.confirm_hosting(token)
+            self.manager.begin_final_upload(token)
+
+        # Activity touches every 200 seconds up to 500 seconds total
+        for t in (1200.0, 1400.0, 1500.0):
+            with patch("time.time", return_value=t):
+                touched = self.manager.touch_activity(token)
+                self.assertTrue(touched)
+                status = self.manager.get_public_status()
+                self.assertEqual(status["state"], SessionState.UPLOADING_FINAL.value)
+
+        # After 1500 + TTL + 1s of total silence, it finally expires
+        with patch("time.time", return_value=1500.0 + self.manager.FINAL_UPLOAD_TTL_SECONDS + 1.0):
             status = self.manager.get_public_status()
             self.assertEqual(status["state"], SessionState.IDLE.value)
 
