@@ -426,3 +426,126 @@ def test_wrapper_args_wrapper_setup():
     known_no_setup, game_args2 = parse_wrapper_args(["--load-game", "test.zip"])
     assert known_no_setup.wrapper_setup is False
     assert game_args2 == ["--load-game", "test.zip"]
+
+
+# ============================================================================
+# 10. Тесты снятия и архивации мира с сервера
+# ============================================================================
+
+
+def test_gui_archive_world_workflow_download_local(tmp_path: Path):
+    """Снятие мира с сервера со скачиванием локальной копии в saves/."""
+    user_data = tmp_path / "userdata"
+    user_data.mkdir(parents=True)
+    env = FactorioEnvironment(custom_user_data_dir=user_data)
+    env.ensure_dirs()
+
+    cfg = ClientConfig(
+        hub_http_url="http://127.0.0.1:8088",
+        player_name="Pikachu",
+        device_token="tok_123",
+    )
+
+    mock_client = MagicMock()
+    mock_client.get_status.return_value = {
+        "state": "idle",
+        "save_exists": True,
+    }
+    mock_client.reset_server_world.return_value = {
+        "success": True,
+        "exists": False,
+        "archive_name": "archived_test.zip",
+    }
+
+    def fake_download(dest, **kwargs):
+        dest = Path(dest)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text("DUMMY_DOWNLOADED_WORLD")
+        return dest
+
+    mock_client.download_save.side_effect = fake_download
+
+    root = tk.Tk()
+    root.withdraw()
+    try:
+        with patch("src.client.setup_gui.HubClient", return_value=mock_client):
+            window = FirstRunSetupWindow(
+                root=root,
+                env=env,
+                existing_config=cfg,
+                installer_mode=False,
+                http_client=MagicMock(),
+            )
+            window.server_has_save = True
+
+            # Вызываем рабочую функцию архивации со скачиванием
+            window._archive_world_worker(download_local=True)
+
+            # 1. Проверяем вызовы HubClient
+            assert mock_client.download_save.called
+            mock_client.reset_server_world.assert_called_once_with(player_name="Pikachu")
+
+            # 2. Проверяем локальные файлы: копия создана в saves/
+            saves = list(env.saves_dir.glob("cloud_world_предыдущий_глобальный_сервер_*.zip"))
+            assert len(saves) == 1
+            assert saves[0].read_text() == "DUMMY_DOWNLOADED_WORLD"
+
+            # 3. Сервер помечен как пустой
+            assert window.server_has_save is False
+    finally:
+        try:
+            root.destroy()
+        except Exception:
+            pass
+
+
+def test_gui_archive_world_workflow_vps_only(tmp_path: Path):
+    """Снятие мира с сервера без локального скачивания (только архив на VPS)."""
+    user_data = tmp_path / "userdata2"
+    user_data.mkdir(parents=True)
+    env = FactorioEnvironment(custom_user_data_dir=user_data)
+    env.ensure_dirs()
+
+    cfg = ClientConfig(
+        hub_http_url="http://127.0.0.1:8088",
+        player_name="Pikachu",
+        device_token="tok_123",
+    )
+
+    mock_client = MagicMock()
+    mock_client.get_status.return_value = {
+        "state": "idle",
+        "save_exists": True,
+    }
+    mock_client.reset_server_world.return_value = {
+        "success": True,
+        "exists": False,
+        "archive_name": "archived_vps.zip",
+    }
+
+    root = tk.Tk()
+    root.withdraw()
+    try:
+        with patch("src.client.setup_gui.HubClient", return_value=mock_client):
+            window = FirstRunSetupWindow(
+                root=root,
+                env=env,
+                existing_config=cfg,
+                installer_mode=False,
+                http_client=MagicMock(),
+            )
+            window.server_has_save = True
+
+            # Вызываем рабочую функцию архивации без скачивания
+            window._archive_world_worker(download_local=False)
+
+            # download_save НЕ должен вызываться
+            assert not mock_client.download_save.called
+            mock_client.reset_server_world.assert_called_once_with(player_name="Pikachu")
+            assert window.server_has_save is False
+    finally:
+        try:
+            root.destroy()
+        except Exception:
+            pass
+

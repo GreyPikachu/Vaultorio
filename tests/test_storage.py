@@ -252,6 +252,33 @@ class TestSaveStorageManager(unittest.TestCase):
         with self.assertRaises(SaveNotFoundError):
             self.manager.restore_from_backup(2)
 
+    def test_archive_and_remove_current_world(self):
+        """Проверка архивации и снятия активного мира с сервера."""
+        # Создаем активный мир
+        save_file = self.temp_dir / "active_world.zip"
+        self._create_valid_factorio_zip(save_file)
+        meta = self.manager.save_new_world_atomic(save_file, uploaded_by="Pikachu")
+        self.assertTrue(self.config.current_save_path.is_file())
+        self.assertTrue(meta["exists"])
+
+        # Вызываем архивацию и удаление
+        res = self.manager.archive_and_remove_current_world(deleted_by="Pikachu")
+        self.assertTrue(res["success"])
+        self.assertFalse(res["exists"])
+
+        # Проверяем, что активный файл удален
+        self.assertFalse(self.config.current_save_path.exists())
+        meta_after = self.manager.get_current_save_metadata()
+        self.assertFalse(meta_after["exists"])
+        raw_meta = self.manager._read_metadata_file_locked()
+        self.assertEqual(raw_meta["status"], "archived")
+        self.assertEqual(raw_meta["archived_by"], "Pikachu")
+
+        # Проверяем, что бэкап сохранен
+        self.assertTrue((self.config.backups_dir / "backup_1.zip").is_file())
+        archive_files = list(self.config.backups_dir.glob("archived_*.zip"))
+        self.assertEqual(len(archive_files), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -432,6 +432,39 @@ class TestServerAPI(unittest.TestCase):
         # touch_activity must be called at least once (by middleware and/or chunk reader)
         self.assertGreaterEqual(mock_touch.call_count, 1)
 
+    def test_reset_world_endpoints(self):
+        """Проверка эндпоинта /reset-world и DELETE /save: архивация и очистка сервера."""
+        # 1. Загружаем тестовый мир
+        save_path = self.temp_dir / "init_world.zip"
+        self._create_valid_factorio_zip(save_path)
+        self.storage.save_new_world_atomic(save_path, uploaded_by="Bob")
+        status = self.client.get("/status").json()
+        self.assertTrue(status["save_exists"])
+
+        # 2. Когда сервер свободен (idle), вызываем POST /reset-world
+        res = self.client.post("/reset-world", json={"player_name": "Bob"})
+        self.assertEqual(res.status_code, 200)
+        self.assertTrue(res.json()["success"])
+        self.assertFalse(res.json()["exists"])
+
+        # 3. Проверяем /status: save_exists теперь False
+        status_after = self.client.get("/status").json()
+        self.assertFalse(status_after["save_exists"])
+
+        # 4. Проверяем отклонение, если сервер занят (hosting_active)
+        # Снова создаем мир и захватываем хост
+        save_path2 = self.temp_dir / "init_world2.zip"
+        self._create_valid_factorio_zip(save_path2)
+        self.storage.save_new_world_atomic(save_path2, uploaded_by="Bob")
+        claim = self.client.post("/claim", json={"player_name": "Alice"}).json()
+        self.client.post("/confirm-hosting", json={"session_token": claim["session_token"]})
+        self.assertEqual(self.client.get("/status").json()["state"], "hosting_active")
+
+        busy_res = self.client.post("/reset-world", json={"player_name": "Bob"})
+        self.assertEqual(busy_res.status_code, 409)
+        self.assertEqual(busy_res.json()["error"], "server_busy")
+
+
 
 if __name__ == "__main__":
     unittest.main()

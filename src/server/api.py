@@ -589,6 +589,43 @@ def create_app(
             logger.error("Failed to save mod manifest: %s", exc)
             return JSONResponse(status_code=500, content={"error": "save_manifest_failed", "message": str(exc)})
 
+    @app.post("/reset-world", dependencies=[Depends(verify_device_token)])
+    @app.delete("/save", dependencies=[Depends(verify_device_token)])
+    async def reset_world(request: Request) -> JSONResponse:
+        """
+        Перемещает текущий активный мир в архив сервера и очищает сервер (делает save_exists = False).
+        Доступно только когда на сервере никто не играет (state == 'idle').
+        """
+        status = app_session.get_public_status()
+        state = status.get("state")
+        if state != "idle":
+            host_name = status.get("host_name") or "другой игрок"
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "error": "server_busy",
+                    "message": f"Сейчас на сервере играет {host_name}. Снять мир можно только когда сервер свободен.",
+                },
+            )
+
+        player_name = "Player"
+        try:
+            body = await request.json()
+            if isinstance(body, dict):
+                player_name = body.get("player_name") or body.get("deleted_by") or "Player"
+        except Exception:
+            pass
+
+        try:
+            res = app_storage.archive_and_remove_current_world(deleted_by=player_name)
+            return JSONResponse(status_code=200, content=res)
+        except Exception as exc:
+            logger.error("Failed to reset world: %s", exc, exc_info=True)
+            return JSONResponse(
+                status_code=500,
+                content={"error": "reset_world_failed", "message": str(exc)},
+            )
+
     return app
 
 

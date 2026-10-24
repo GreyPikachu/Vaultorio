@@ -453,6 +453,21 @@ class TestHubClientIntegration(unittest.TestCase):
         self.assertEqual(last_uploaded, last_total)
         self.assertGreater(last_speed, 0)
 
+    def test_reset_server_world(self) -> None:
+        """Проверка вызова reset_server_world через HubClient."""
+        # 1. Загружаем тестовый сейв
+        save_path = self._create_valid_factorio_zip(Path(self.temp_dir) / "world_to_reset.zip")
+        self.storage.save_new_world_atomic(save_path, uploaded_by="Bob")
+        self.assertTrue(self.hub_client.get_status()["save_exists"])
+
+        # 2. Вызываем reset_server_world
+        res = self.hub_client.reset_server_world(player_name="Bob")
+        self.assertTrue(res["success"])
+        self.assertFalse(res["exists"])
+
+        # 3. Сервер стал пустым
+        self.assertFalse(self.hub_client.get_status()["save_exists"])
+
 
 if __name__ == "__main__":
     unittest.main()

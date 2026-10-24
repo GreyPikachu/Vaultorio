@@ -529,6 +529,72 @@ class SaveStorageManager:
             self._write_metadata_file_locked(restored_metadata)
             return restored_metadata
 
+    def archive_and_remove_current_world(self, deleted_by: str = "Player") -> Dict[str, Any]:
+        """
+        Архивирует текущий активный мир cloud_world.zip в backups/ и удаляет его с сервера,
+        делая сервер пустым (готовым для публикации нового мира).
+
+        1. Поворачивает существующие бэкапы (current -> backup_1, backup_1 -> backup_2).
+        2. Дополнительно создает несгораемый архив с временной меткой в backups_dir.
+        3. Удаляет активный файл cloud_world.zip.
+        4. Обновляет save_metadata.json (exists = False).
+        5. Очищает текущий mod-list.json.
+        """
+        with self._lock:
+            current_path = self.config.current_save_path
+            if not current_path.exists() or not current_path.is_file():
+                return {
+                    "success": True,
+                    "exists": False,
+                    "message": "На сервере нет активного мира для удаления",
+                }
+
+            # 1. Поворачиваем циклические бэкапы
+            self._rotate_backups_locked()
+
+            # 2. Создаем постоянный именованный архив с датой и временем
+            ts_str = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+            archive_name = f"archived_{ts_str}_{self.config.current_save_filename}"
+            archive_path = self.config.backups_dir / archive_name
+            try:
+                shutil.copy2(current_path, archive_path)
+                logger.info("Created permanent timestamped archive at %s", archive_path)
+            except Exception as arc_err:
+                logger.warning("Failed to copy permanent archive: %s", arc_err)
+
+            # 3. Удаляем активный файл мира
+            try:
+                current_path.unlink()
+                logger.info("Active save file %s unlinked from server", current_path)
+            except Exception as unl_err:
+                logger.error("Failed to unlink active save %s: %s", current_path, unl_err)
+                raise StorageError(f"Не удалось удалить файл мира: {unl_err}") from unl_err
+
+            # 4. Обновляем save_metadata.json
+            new_metadata: Dict[str, Any] = {
+                "exists": False,
+                "status": "archived",
+                "archived_at": datetime.now(timezone.utc).isoformat(),
+                "archived_by": deleted_by,
+                "archive_file": archive_name,
+            }
+            self._write_metadata_file_locked(new_metadata)
+
+            # 5. Очищаем mod-list.json (если был)
+            mod_file = self.config.storage_dir / "mod-list.json"
+            if mod_file.exists():
+                try:
+                    mod_file.unlink(missing_ok=True)
+                except Exception:
+                    pass
+
+            return {
+                "success": True,
+                "exists": False,
+                "message": f"Мир успешно перемещен в архив сервера ({archive_name}) и снят с публикации.",
+                "archive_name": archive_name,
+            }
+
     def _read_metadata_file_locked(self) -> Dict[str, Any]:
         """Reads metadata JSON file. Must be called while holding self._lock."""
         meta_path = self.config.metadata_file_path

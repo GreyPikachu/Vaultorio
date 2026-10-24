@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 import json
 import logging
 import os
@@ -664,6 +665,18 @@ class FirstRunSetupWindow:
         )
         self.world_combo.pack(fill=tk.X, pady=(4, 4))
 
+        self.world_actions_frame = tk.Frame(self.world_card, bg=COLOR_CARD)
+        self.world_actions_frame.pack(fill=tk.X, pady=(2, 4))
+
+        self.archive_world_btn = ttk.Button(
+            self.world_actions_frame,
+            text="Снять мир с сервера / В архив...",
+            style="Secondary.TButton",
+            command=self._on_archive_world_click,
+        )
+        if self.is_already_configured and self.server_has_save:
+            self.archive_world_btn.pack(side=tk.LEFT)
+
         self.world_hint_lbl = tk.Label(
             self.world_card,
             text="Одиночные игры и другие карты не затрагивают сервер",
@@ -990,6 +1003,11 @@ class FirstRunSetupWindow:
             self.inputs_card.pack(fill=self.tk.X, pady=(0, 10))
         if self.world_card:
             self.world_card.pack(fill=self.tk.X, pady=(0, 10))
+        if hasattr(self, "archive_world_btn"):
+            if self.server_has_save:
+                self.archive_world_btn.pack(side=tk.LEFT)
+            else:
+                self.archive_world_btn.pack_forget()
         self.action_btn.config(
             text="Применить и запустить игру",
             style="Accent.TButton",
@@ -1430,6 +1448,193 @@ class FirstRunSetupWindow:
             logger.warning(f"Ошибка при публикации выбранного мира: {err}")
             self._schedule_ui(lambda e=err: self._on_activation_error(e))
 
+    def _on_archive_world_click(self) -> None:
+        """Открывает диалог выбора: скачать мир локально перед удалением или сразу архивировать на VPS."""
+        if self.is_activating:
+            return
+
+        try:
+            dialog = tk.Toplevel(self.root)
+            dialog.title("Управление сервером")
+            dialog.configure(bg=COLOR_BG)
+            dialog.resizable(False, False)
+            dialog.transient(self.root)
+            dialog.grab_set()
+
+            # Центрирование относительно главного окна
+            w, h = 500, 260
+            try:
+                rx = self.root.winfo_x()
+                ry = self.root.winfo_y()
+                rw = self.root.winfo_width()
+                rh = self.root.winfo_height()
+                x = max(0, rx + (rw - w) // 2)
+                y = max(0, ry + (rh - h) // 2)
+                dialog.geometry(f"{w}x{h}+{x}+{y}")
+            except Exception:
+                dialog.geometry(f"{w}x{h}")
+
+            frame = tk.Frame(dialog, bg=COLOR_CARD, padx=16, pady=16, relief=tk.SOLID, bd=1)
+            frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+            title_lbl = tk.Label(
+                frame,
+                text="Архивация и снятие мира с сервера",
+                font=("Helvetica", 11, "bold"),
+                fg=COLOR_TEXT,
+                bg=COLOR_CARD,
+            )
+            title_lbl.pack(anchor="w", pady=(0, 6))
+
+            desc_lbl = tk.Label(
+                frame,
+                text=(
+                    "Текущий общий мир будет снят с сервера и перемещен в архив на VPS.\n"
+                    "После этого сервер станет пустым, и вы сможете выбрать другой мир.\n\n"
+                    "Вы хотите сохранить копию мира в свои локальные сохранения Factorio?"
+                ),
+                font=("Helvetica", 9),
+                fg=COLOR_TEXT_MUTED,
+                bg=COLOR_CARD,
+                wraplength=460,
+                justify="left",
+            )
+            desc_lbl.pack(anchor="w", pady=(0, 12))
+
+            def _do_action(download_local: bool) -> None:
+                try:
+                    dialog.destroy()
+                except Exception:
+                    pass
+                self._execute_world_archive(download_local=download_local)
+
+            btn_row = tk.Frame(frame, bg=COLOR_CARD)
+            btn_row.pack(fill=tk.X, pady=(4, 0))
+
+            btn_dl = ttk.Button(
+                btn_row,
+                text="Скачать в сохранения и снять с сервера",
+                style="Accent.TButton",
+                command=lambda: _do_action(download_local=True),
+            )
+            btn_dl.pack(fill=tk.X, pady=(0, 6))
+
+            btn_vps = ttk.Button(
+                btn_row,
+                text="Снять с сервера (сохранить только на VPS)",
+                style="Secondary.TButton",
+                command=lambda: _do_action(download_local=False),
+            )
+            btn_vps.pack(fill=tk.X, pady=(0, 6))
+
+            btn_cancel = ttk.Button(
+                btn_row,
+                text="Отмена",
+                style="Secondary.TButton",
+                command=dialog.destroy,
+            )
+            btn_cancel.pack(fill=tk.X)
+        except Exception as e:
+            logger.warning(f"Ошибка открытия окна диалога архивации: {e}")
+            from tkinter import messagebox
+            ans = messagebox.askyesno(
+                "Снятие мира с сервера",
+                "Снять текущий мир с сервера и сохранить его в архив VPS?\n"
+                "(Сервер станет пустым для выбора нового мира)",
+            )
+            if ans:
+                self._execute_world_archive(download_local=False)
+
+    def _execute_world_archive(self, download_local: bool) -> None:
+        """Запускает процесс архивации и сброса мира на сервере в фоновом потоке."""
+        if self.is_activating:
+            return
+        self.is_activating = True
+        self.action_btn.config(state="disabled")
+        if hasattr(self, "archive_world_btn"):
+            self.archive_world_btn.config(state="disabled")
+
+        self.set_status("Связь с сервером...", color=COLOR_INFO)
+
+        worker = threading.Thread(
+            target=self._archive_world_worker,
+            args=(download_local,),
+            daemon=True,
+            name="WorldArchiveThread",
+        )
+        worker.start()
+
+    def _archive_world_worker(self, download_local: bool) -> None:
+        """Фоновый рабочий поток архивации мира."""
+        try:
+            cfg = self.existing_config
+            if not cfg:
+                raise ValueError("Конфигурация клиента отсутствует.")
+
+            hub_client = HubClient(config=cfg, http_client=self.http_client)
+            # 1. Проверяем статус сервера
+            st = hub_client.get_status(timeout=10.0)
+            state = st.get("state") or st.get("session", {}).get("state", "idle")
+            if state != "idle":
+                current_host = st.get("current_host") or st.get("session", {}).get("host_name") or "другой игрок"
+                raise RuntimeError(
+                    f"Сейчас на сервере играет {current_host}. Снять мир можно только когда сервер свободен."
+                )
+
+            saved_local_name: Optional[str] = None
+            if download_local:
+                self._schedule_ui(
+                    lambda: self.set_status("Скачивание копии мира в локальные сохранения...", color=COLOR_INFO)
+                )
+                ts_str = datetime.now().strftime("%Y-%m-%d_%H-%M")
+                saved_local_name = f"cloud_world_предыдущий_глобальный_сервер_{ts_str}.zip"
+                dest_path = self.env.saves_dir / saved_local_name
+                self.env.saves_dir.mkdir(parents=True, exist_ok=True)
+                hub_client.download_save(dest_path)
+                logger.info(f"Локальная копия мира сохранена в {dest_path}")
+
+            self._schedule_ui(lambda: self.set_status("Перемещение мира в архив сервера...", color=COLOR_INFO))
+            player_name = cfg.player_name or self.player_name or "Player"
+            res = hub_client.reset_server_world(player_name=player_name)
+            logger.info(f"Серверный мир архивирован: {res}")
+
+            self.server_has_save = False
+
+            # Обновляем локальный список сохранений
+            local_saves = []
+            try:
+                local_saves = self.env.list_local_saves(include_cloud_world=False)
+            except Exception:
+                pass
+
+            def _on_success():
+                self.is_activating = False
+                if hasattr(self, "archive_world_btn"):
+                    self.archive_world_btn.pack_forget()
+                self._transition_to_empty_server_world_selection(cfg, local_saves)
+                if saved_local_name:
+                    msg = (
+                        f"Копия сохранена как '{saved_local_name}'. "
+                        "Мир снят с сервера в архив. Выберите новый мир для загрузки."
+                    )
+                else:
+                    msg = "Мир успешно перемещен в архив сервера. Выберите локальный мир для загрузки или начните игру."
+                self.set_status(msg, color=COLOR_SUCCESS)
+
+            self._schedule_ui(_on_success)
+
+        except Exception as e:
+            logger.error(f"Ошибка архивации мира: {e}")
+
+            def _on_error(err=e):
+                self.is_activating = False
+                self.action_btn.config(state="normal")
+                if hasattr(self, "archive_world_btn"):
+                    self.archive_world_btn.config(state="normal")
+                self.set_status(f"Ошибка: {err}", color=COLOR_ERROR)
+
+            self._schedule_ui(_on_error)
+
     def _on_publish_success(self) -> None:
         """Обрабатывает успешную публикацию мира."""
         if hasattr(self, "progress_bar"):
@@ -1448,6 +1653,10 @@ class FirstRunSetupWindow:
         self.existing_config = cfg
         self.result_config = cfg
         self.is_already_configured = True
+
+        # Скрываем кнопку архивации, так как сервер уже пуст
+        if hasattr(self, "archive_world_btn"):
+            self.archive_world_btn.pack_forget()
 
         # Скрываем карточку ввода кода
         if self.inputs_card:

@@ -796,6 +796,45 @@ class HubClient:
             logger.error(f"Ошибка при активации билета приглашения на сервере: {e}")
             raise
 
+    def reset_server_world(self, player_name: str = "Player") -> dict[str, Any]:
+        """Запрашивает архивацию и удаление активного мира на сервере (POST /reset-world).
+
+        Args:
+            player_name: Имя игрока, инициировавшего архивацию.
+
+        Returns:
+            Словарь с ответом сервера: {"success": True, "exists": False, "archive_name": ...}
+
+        Raises:
+            RuntimeError: Если сервер занят другим игроком или произошла ошибка.
+        """
+        url = f"{self.config.hub_http_url}/reset-world"
+        headers = {"X-Device-Token": self.device_token} if self.device_token else {}
+        try:
+            resp = self._client.post(
+                url,
+                headers=headers,
+                json={"player_name": player_name},
+                timeout=15.0,
+            )
+            if resp.status_code == 409:
+                err_data = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {}
+                msg = err_data.get("message", "Сервер занят другим игроком.")
+                raise RuntimeError(msg)
+            resp.raise_for_status()
+            return resp.json()
+        except httpx.HTTPStatusError as e:
+            try:
+                err_data = e.response.json()
+                msg = err_data.get("message", str(e))
+            except Exception:
+                msg = str(e)
+            raise RuntimeError(f"Ошибка сервера при удалении мира: {msg}") from e
+        except Exception as e:
+            if isinstance(e, RuntimeError):
+                raise
+            raise RuntimeError(f"Сетевая ошибка при удалении мира с сервера: {e}") from e
+
     @classmethod
     def activate_with_invite_code(
         cls,
