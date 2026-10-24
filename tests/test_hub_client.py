@@ -290,8 +290,8 @@ class TestHubClientIntegration(unittest.TestCase):
         self.assertTrue(res["updated"])
         self.assertEqual(compute_file_sha256(local_file), new_server_sha)
 
-        # Проверяем бэкап старого локального файла
-        backup_file = self.env.saves_dir / "cloud_world_prev_local.zip"
+        # Проверяем бэкап старого локального файла в stash
+        backup_file = self.env.cloud_stash_dir / "cloud_world_prev_local.zip"
         self.assertTrue(backup_file.is_file())
         self.assertEqual(compute_file_sha256(backup_file), old_local_sha)
 

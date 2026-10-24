@@ -609,6 +609,9 @@ class SessionOrchestrator:
                             f"ВНИМАНИЕ: На сервере активны моды, отсутствующие локально: {sync_res['mods_mismatch']}"
                         )
 
+                    # Очистка устаревших автосейвов перед стартом Хоста
+                    self.env.clean_autosaves_for_host()
+
                     # Настройка параметров мультиплеера для Хоста
                     self.env.prepare_multiplayer_settings(is_host=True)
 
@@ -709,7 +712,7 @@ class SessionOrchestrator:
         cmd = [str(core_bin), *(game_args or [])]
         logger.info(f"Запуск процесса Factorio: {' '.join(cmd)}")
 
-        proc = subprocess.Popen(cmd)
+        proc = subprocess.Popen(cmd, cwd=str(core_bin.parent))
         self.game_process = proc
         return proc
 
@@ -845,7 +848,7 @@ class SessionOrchestrator:
                 f"Автономный запуск (OFFLINE) на Windows: запуск {core_bin.name} и немедленный выход: {' '.join(cmd)}"
             )
             try:
-                subprocess.Popen(cmd)
+                subprocess.Popen(cmd, cwd=str(core_bin.parent))
                 return 0
             except Exception as popen_err:
                 logger.error(f"Ошибка запуска процесса на Windows: {popen_err}")

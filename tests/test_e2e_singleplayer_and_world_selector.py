@@ -295,8 +295,8 @@ def test_e2e_shift_hotkey_world_selector_full_lifecycle(tmp_path: Path):
     # 4. Проверяем локальные файлы клиента:
     # cloud_world.zip обновлен содержимым MegaBase_2026
     assert b"MEGABASE_2026_NEW_SERVER_WORLD" in local_cloud.read_bytes()
-    # cloud_world_prev_local.zip содержит старый локальный сейв
-    prev_local_backup = client_env.saves_dir / "cloud_world_prev_local.zip"
+    # cloud_world_prev_local.zip содержит старый локальный сейв в stash
+    prev_local_backup = client_env.cloud_stash_dir / "cloud_world_prev_local.zip"
     assert prev_local_backup.is_file()
     assert b"OLD_LOCAL_CLOUD_WORLD_CONTENT" in prev_local_backup.read_bytes()
 

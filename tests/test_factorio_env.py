@@ -234,6 +234,42 @@ class TestSplitBrainShield(unittest.TestCase):
         """Если файлов нет, возвращается None."""
         self.assertIsNone(self.env.restore_hidden_cloud_save())
 
+    def test_clean_autosaves_for_host_moves_old_autosaves(self) -> None:
+        """Хост перемещает старые автосейвы и копии в .cloud_stash, оставляя только cloud_world."""
+        (self.env.saves_dir / "cloud_world.zip").write_text("main save")
+        (self.env.saves_dir / "_autosave1.zip").write_text("old auto 1")
+        (self.env.saves_dir / "_autosave2.zip").write_text("old auto 2")
+        (self.env.saves_dir / "cloud_world_prev_local.zip").write_text("backup")
+        (self.env.saves_dir / "MySingleplayerMap.zip").write_text("my map")
+
+        self.env.clean_autosaves_for_host()
+
+        # В saves/ должен остаться cloud_world и личные одиночные карты
+        self.assertTrue((self.env.saves_dir / "cloud_world.zip").is_file())
+        self.assertTrue((self.env.saves_dir / "MySingleplayerMap.zip").is_file())
+        # Автосейвы и бэкапы должны быть убраны из saves/
+        self.assertFalse((self.env.saves_dir / "_autosave1.zip").exists())
+        self.assertFalse((self.env.saves_dir / "_autosave2.zip").exists())
+        self.assertFalse((self.env.saves_dir / "cloud_world_prev_local.zip").exists())
+        # Они перемещены в .cloud_stash
+        self.assertTrue((self.env.cloud_stash_dir / "_autosave1.zip").is_file())
+        self.assertTrue((self.env.cloud_stash_dir / "_autosave2.zip").is_file())
+        self.assertTrue((self.env.cloud_stash_dir / "cloud_world_prev_local.zip").is_file())
+
+    def test_hide_cloud_save_for_guest_also_hides_autosaves(self) -> None:
+        """Гость прячет cloud_world и все автосейвы, предотвращая запуск старых копий."""
+        (self.env.saves_dir / "cloud_world.zip").write_text("main save")
+        (self.env.saves_dir / "_autosave1.zip").write_text("auto 1")
+        (self.env.saves_dir / "MySingleplayerMap.zip").write_text("my map")
+
+        self.env.hide_cloud_save_for_guest()
+
+        self.assertFalse((self.env.saves_dir / "cloud_world.zip").exists())
+        self.assertFalse((self.env.saves_dir / "_autosave1.zip").exists())
+        self.assertTrue((self.env.saves_dir / "MySingleplayerMap.zip").is_file())
+        self.assertTrue((self.env.cloud_stash_dir / "cloud_world.zip").is_file())
+        self.assertTrue((self.env.cloud_stash_dir / "_autosave1.zip").is_file())
+
 
 class TestPlayerUsernameManagement(unittest.TestCase):
     """T6.4: Тестирование чтения и записи ника игрока."""

@@ -207,6 +207,19 @@ class FactorioEnvironment:
         try:
             self.cloud_stash_dir.mkdir(parents=True, exist_ok=True)
 
+            # Скрываем также любые автосейвы _autosave*.zip и cloud_world_prev*.zip для Гостя
+            if self.saves_dir.is_dir():
+                for entry in self.saves_dir.iterdir():
+                    if not entry.is_file():
+                        continue
+                    name_l = entry.name.lower()
+                    if name_l.startswith("_autosave") or name_l.startswith("cloud_world_prev"):
+                        try:
+                            os.replace(entry, self.cloud_stash_dir / entry.name)
+                            logger.debug(f"Файл {entry.name} скрыт в .cloud_stash/ для Гостя.")
+                        except Exception:
+                            pass
+
             if src_file.is_file():
                 # Атомарное перемещение внутри одной файловой системы
                 os.replace(src_file, stash_file)
@@ -225,6 +238,26 @@ class FactorioEnvironment:
         except Exception as e:
             logger.error(f"Ошибка при скрытии сейва {target_name} для Гостя: {e}")
             raise
+
+    def clean_autosaves_for_host(self) -> None:
+        """Перемещает устаревшие автосейвы (_autosave*.zip) и резервные копии в .cloud_stash/.
+
+        Гарантирует, что при открытии меню «Запустить сохранённую игру» Хост видит
+        только чистый файл cloud_world.zip, исключая путаницу со старыми снимками.
+        """
+        if not self.saves_dir.is_dir():
+            return
+        self.cloud_stash_dir.mkdir(parents=True, exist_ok=True)
+        for entry in self.saves_dir.iterdir():
+            if not entry.is_file():
+                continue
+            name_l = entry.name.lower()
+            if name_l.startswith("_autosave") or name_l.startswith("cloud_world_prev"):
+                try:
+                    os.replace(entry, self.cloud_stash_dir / entry.name)
+                    logger.info(f"Старый файл {entry.name} перемещен в .cloud_stash/ перед стартом Хоста.")
+                except Exception:
+                    pass
 
     def restore_hidden_cloud_save(self, save_name: str | None = None) -> Path | None:
         """Возвращает скрытый файл сохранения из .cloud_stash/ обратно в корень saves/.

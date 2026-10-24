@@ -523,7 +523,7 @@ def test_t10_6_7_run_offline_windows_popen(test_env: FactorioEnvironment, tmp_pa
 
         code = orchestrator.run(game_args=["--win-arg"])
         assert code == 0
-        mock_popen.assert_called_once_with([str(dummy_bin), "--win-arg"])
+        mock_popen.assert_called_once_with([str(dummy_bin), "--win-arg"], cwd=str(dummy_bin.parent))
         mock_wait.assert_not_called()
 
 

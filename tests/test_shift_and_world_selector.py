@@ -211,8 +211,8 @@ def test_publish_selected_world_success(tmp_path: Path):
 
     assert res["published"] is True
 
-    # Проверяем, что был создан локальный бэкап старого cloud_world.zip
-    backup_file = saves_dir / "cloud_world_prev_local.zip"
+    # Проверяем, что был создан локальный бэкап старого cloud_world.zip в stash
+    backup_file = env.cloud_stash_dir / "cloud_world_prev_local.zip"
     assert backup_file.is_file()
     with zipfile.ZipFile(backup_file, "r") as zf:
         assert zf.read("level.dat").decode("utf-8") == "OLD_SERVER_WORLD"

@@ -469,11 +469,12 @@ class HubClient:
                 part_path.unlink(missing_ok=True)
                 raise ValueError("Скачанный файл не является валидным ZIP-архивом.")
 
-            # Резервное копирование старого локального файла (если был)
+            # Резервное копирование старого локального файла (в скрытую папку .cloud_stash)
             if local_save_path.is_file():
-                backup_local = env.saves_dir / "cloud_world_prev_local.zip"
+                env.cloud_stash_dir.mkdir(parents=True, exist_ok=True)
+                backup_local = env.cloud_stash_dir / "cloud_world_prev_local.zip"
                 shutil.copy2(local_save_path, backup_local)
-                logger.info(f"Предыдущий локальный сейв сохранен в {backup_local.name}")
+                logger.info(f"Предыдущий локальный сейв сохранен в .cloud_stash/{backup_local.name}")
 
             # Атомарная замена
             os.replace(part_path, local_save_path)

@@ -81,7 +81,8 @@ def publish_selected_world_to_server(
     # Если исходный файл не является самим cloud_world.zip
     if path.resolve() != canonical_save.resolve():
         if canonical_save.exists():
-            backup_save = env.saves_dir / f"{canonical_save.stem}_prev_local.zip"
+            env.cloud_stash_dir.mkdir(parents=True, exist_ok=True)
+            backup_save = env.cloud_stash_dir / f"{canonical_save.stem}_prev_local.zip"
             try:
                 shutil.copy2(canonical_save, backup_save)
                 logger.info(f"Создана резервная копия старого мира: {backup_save.name}")
@@ -1017,6 +1018,35 @@ class FirstRunSetupWindow:
                     self._schedule_ui(lambda: self._transition_to_empty_server_world_selection(self.existing_config, local_saves))
                     return
 
+            # Проверяем, свободен ли сервер (роль Хоста) и нужно ли обновить локальный сейв
+            server_state = st.get("state") or st.get("session", {}).get("state", "idle")
+            server_sha = st.get("sha256") or st.get("save", {}).get("sha256")
+            local_save = self.env.saves_dir / self.env.cloud_save_name
+
+            if server_state == "idle" and server_sha and self.server_has_save:
+                needs_download = True
+                if local_save.is_file():
+                    try:
+                        from src.client.hub_client import compute_file_sha256
+                        if compute_file_sha256(local_save) == server_sha:
+                            needs_download = False
+                    except Exception:
+                        needs_download = True
+
+                if needs_download:
+                    logger.info("Обнаружена новая версия сейва на сервере. Скачивание через лаунчер...")
+                    self._schedule_ui(lambda: self._show_progress_card("Синхронизация мира с сервером..."))
+                    self._schedule_ui(lambda: self.set_status("Загрузка актуального мира из облака...", color=COLOR_INFO))
+
+                    def _progress_cb(downloaded: int, total: int, speed: float) -> None:
+                        self._schedule_ui(lambda: self._update_progress(downloaded, total, speed))
+
+                    hub_client.download_save(
+                        target_path=local_save,
+                        expected_sha=server_sha,
+                        progress_callback=_progress_cb,
+                    )
+
             self._schedule_ui(self._on_auto_connect_success)
         except Exception as exc:
             logger.warning(f"Ошибка при автоподключении к серверу: {exc}")
@@ -1034,7 +1064,7 @@ class FirstRunSetupWindow:
             pass
         self.progress_title_lbl.config(text="Сервер готов!")
         self.progress_bytes_lbl.config(text="Облачный мир готов к запуску")
-        self.set_status("Подключено! Запуск игры Factorio...", color=COLOR_SUCCESS)
+        self.set_status("Синхронизация завершена! Запуск игры Factorio...", color=COLOR_SUCCESS)
         self.result_config = self.existing_config
         self.root.after(400, self._close_window_cleanly)
 
