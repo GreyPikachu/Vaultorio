@@ -1184,6 +1184,69 @@ class TestGUISubprocessIsolationAndCleanClose(unittest.TestCase):
         self.root.update()
         self.assertIn("билет аннулирован", app.status_lbl.cget("text"))
 
+    def test_window_close_sets_user_aborted_and_prevents_game_launch(self):
+        """Проверяет, что при нажатии на крестик окна игра не запускается вообще."""
+        app = FirstRunSetupWindow(
+            root=self.root,
+            env=self.env,
+            config_path=self.tmp_path / "sync_cfg.json",
+        )
+        with patch.object(app, "_close_window_cleanly"):
+            app._on_window_close()
+        self.assertIsNotNone(app.result_config)
+        self.assertTrue(getattr(app.result_config, "user_aborted", False))
+
+        # Проверяем поведение SessionOrchestrator
+        mock_gui_provider = MagicMock(return_value=ClientConfig(user_aborted=True))
+        mock_hub = MagicMock(spec=HubClient)
+        orch = SessionOrchestrator(
+            config=ClientConfig(device_token="dev_tok_configured_999"),
+            env=self.env,
+            hub_client=mock_hub,
+            setup_gui_provider=mock_gui_provider,
+            force_setup_gui=True,
+        )
+
+        with patch.object(orch, "launch_game") as mock_launch, \
+             patch.object(orch, "_run_offline") as mock_run_offline:
+            exit_code = orch.run()
+            self.assertEqual(exit_code, 0)
+            mock_launch.assert_not_called()
+            mock_run_offline.assert_not_called()
+
+    def test_run_setup_gui_in_subprocess_aborted(self):
+        """Проверяет, что подпроцесс со статусом aborted возвращает ClientConfig(user_aborted=True)."""
+        from src.client.setup_gui import run_setup_gui_in_subprocess
+
+        def fake_subprocess_abort(cmd, env=None, check=False):
+            result_file_path = None
+            for idx, arg in enumerate(cmd):
+                if arg == "--subprocess-result" and idx + 1 < len(cmd):
+                    result_file_path = Path(cmd[idx + 1])
+                    break
+            if result_file_path:
+                result_file_path.write_text(
+                    json.dumps({
+                        "status": "aborted",
+                        "user_aborted": True,
+                        "config": {"user_aborted": True},
+                    }, ensure_ascii=False),
+                    encoding="utf-8",
+                )
+            mock_res = MagicMock()
+            mock_res.returncode = 0
+            return mock_res
+
+        with patch("subprocess.run", side_effect=fake_subprocess_abort):
+            cfg = run_setup_gui_in_subprocess(
+                env=self.env,
+                config_path=self.tmp_path / "cfg.json",
+            )
+
+        self.assertIsNotNone(cfg)
+        self.assertTrue(cfg.user_aborted)
+
+
 
 
 

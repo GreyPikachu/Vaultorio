@@ -410,6 +410,15 @@ class SessionOrchestrator:
                                 "reason": "uninstalled_by_user",
                             }
 
+                        if new_config and getattr(new_config, "user_aborted", False):
+                            logger.info("Пользователь нажал крестик закрытия окна GUI. Завершение работы без запуска игры.")
+                            self.role = RoleType.OFFLINE
+                            self.is_prepared = True
+                            return {
+                                "role": self.role,
+                                "reason": "aborted_by_user",
+                            }
+
                         if new_config and getattr(new_config, "offline_mode", False):
                             logger.info("Пользователь запросил автономный запуск игры в GUI. Переход в OFFLINE.")
                             self.role = RoleType.OFFLINE
@@ -441,9 +450,13 @@ class SessionOrchestrator:
                                     "reason": "setup_cancelled_by_user",
                                 }
                             else:
-                                logger.info(
-                                    "Окно настроек закрыто, продолжаем запуск с текущей конфигурацией."
-                                )
+                                logger.info("Окно настроек закрыто без сохранения. Завершение работы без запуска игры.")
+                                self.role = RoleType.OFFLINE
+                                self.is_prepared = True
+                                return {
+                                    "role": self.role,
+                                    "reason": "aborted_by_user",
+                                }
                     except Exception as gui_err:
                         logger.warning(f"Ошибка при вызове GUI настройки: {gui_err}")
                         if not self.config.is_configured():
@@ -520,6 +533,15 @@ class SessionOrchestrator:
                                 return {
                                     "role": self.role,
                                     "reason": "uninstalled_by_user",
+                                }
+
+                            if new_config and getattr(new_config, "user_aborted", False):
+                                logger.info("Пользователь нажал крестик закрытия окна повторной авторизации.")
+                                self.role = RoleType.OFFLINE
+                                self.is_prepared = True
+                                return {
+                                    "role": self.role,
+                                    "reason": "aborted_by_user",
                                 }
 
                             if new_config and getattr(new_config, "offline_mode", False):
@@ -862,8 +884,9 @@ class SessionOrchestrator:
         """Запускает полный цикл работы перехватчика: подготовка -> запуск -> teardown."""
         try:
             prep_report = self.prepare_session()
-            if prep_report.get("reason") == "uninstalled_by_user":
-                logger.info("Перехватчик был деинсталлирован пользователем. Завершение работы без запуска игры.")
+            reason = prep_report.get("reason")
+            if reason in ("uninstalled_by_user", "aborted_by_user", "setup_cancelled_by_user"):
+                logger.info(f"Завершение работы без запуска игры (причина: {reason}).")
                 return 0
 
             if self.role == RoleType.OFFLINE:

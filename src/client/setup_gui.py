@@ -365,7 +365,9 @@ class FirstRunSetupWindow:
         self.root.configure(bg=COLOR_BG)
         self.root.resizable(False, False)
         self.root.bind("<<Wakeup>>", lambda e: None)
-        self.root.protocol("WM_DELETE_WINDOW", self._on_cancel_click)
+        self.root.protocol("WM_DELETE_WINDOW", self._on_window_close)
+        self.root.bind("<Command-w>", lambda e: self._on_window_close())
+        self.root.bind("<Control-w>", lambda e: self._on_window_close())
         self._setup_menus_and_shortcuts()
 
         width = 540
@@ -1258,6 +1260,12 @@ class FirstRunSetupWindow:
         except Exception:
             pass
 
+    def _on_window_close(self) -> None:
+        """Закрывает окно при нажатии на крестик (полный выход без запуска игры)."""
+        logger.info("Пользователь нажал крестик закрытия окна (отмена запуска игры).")
+        self.result_config = ClientConfig(user_aborted=True)
+        self._close_window_cleanly()
+
     def _on_cancel_click(self) -> None:
         """Закрывает окно без сохранения настроек (автономный запуск)."""
         logger.info("Пользователь выбрал автономный запуск игры (без сервера).")
@@ -1926,7 +1934,9 @@ def run_first_time_setup_gui(
         root.mainloop()
         if getattr(app, "was_uninstalled", False):
             return ClientConfig(was_uninstalled=True)
-        return app.result_config
+        if app.result_config is not None:
+            return app.result_config
+        return ClientConfig(user_aborted=True)
     except Exception as fatal_gui_err:
         logger.error(f"Критическая ошибка при выполнении GUI первого запуска: {fatal_gui_err}")
         try:
@@ -1934,7 +1944,7 @@ def run_first_time_setup_gui(
             root.destroy()
         except Exception:
             pass
-        return existing_config if (existing_config and existing_config.is_configured()) else None
+        return ClientConfig(user_aborted=True)
 
 
 def run_setup_gui_subprocess_entry(args_file: Path | str, result_file: Path | str) -> int:
@@ -2004,11 +2014,17 @@ def run_setup_gui_subprocess_entry(args_file: Path | str, result_file: Path | st
                 res_data["status"] = "uninstalled"
                 res_data["was_uninstalled"] = True
                 res_data["config"] = cfg.to_dict()
+            elif getattr(cfg, "user_aborted", False):
+                res_data["status"] = "aborted"
+                res_data["user_aborted"] = True
+                res_data["config"] = cfg.to_dict()
             else:
                 res_data["status"] = "ok"
                 res_data["config"] = cfg.to_dict()
         else:
-            res_data["status"] = "cancelled"
+            res_data["status"] = "aborted"
+            res_data["user_aborted"] = True
+            res_data["config"] = ClientConfig(user_aborted=True).to_dict()
 
     except Exception as exc:
         logger.exception(f"Критическая ошибка в дочернем процессе GUI: {exc}")
@@ -2095,10 +2111,15 @@ def run_setup_gui_in_subprocess(
             status = result_raw.get("status")
             cfg_dict = result_raw.get("config")
             was_uninstalled = bool(result_raw.get("was_uninstalled", False))
+            user_aborted = bool(result_raw.get("user_aborted", False)) or (cfg_dict and bool(cfg_dict.get("user_aborted", False)))
 
             if was_uninstalled or status == "uninstalled":
                 logger.info("Подпроцесс сообщил об успешной деинсталляции перехватчика.")
                 return ClientConfig(was_uninstalled=True)
+
+            if user_aborted or status == "aborted":
+                logger.info("Подпроцесс сообщил об отмене запуска пользователем (нажат крестик окна).")
+                return ClientConfig(user_aborted=True)
 
             if status == "ok" and cfg_dict:
                 import dataclasses
@@ -2107,7 +2128,7 @@ def run_setup_gui_in_subprocess(
                 return ClientConfig(**filtered)
 
             logger.info(f"Подпроцесс GUI завершился со статусом '{status}'.")
-            return None
+            return ClientConfig(user_aborted=True)
         except Exception as parse_err:
             logger.error(f"Ошибка при чтении результата подпроцесса GUI: {parse_err}")
             return existing_config if (existing_config and existing_config.is_configured()) else None

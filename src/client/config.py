@@ -34,6 +34,7 @@ class ClientConfig:
     request_timeout_seconds: float = 30.0
     was_uninstalled: bool = False
     offline_mode: bool = False
+    user_aborted: bool = False
 
     def __post_init__(self) -> None:
         """Валидирует параметры конфигурации после инициализации."""
@@ -83,6 +84,8 @@ class ClientConfig:
 
     def is_configured(self) -> bool:
         """Проверяет, выполнена ли первичная настройка клиента (наличие токена и валидного адреса)."""
+        if self.user_aborted:
+            return False
         has_token = bool(self.device_token and self.device_token.strip())
         has_url = bool(self.hub_http_url and self.hub_http_url.strip())
         return has_token and has_url
