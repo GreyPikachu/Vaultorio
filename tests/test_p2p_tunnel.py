@@ -759,3 +759,138 @@ def test_t9_6_3_clean_resource_cleanup_on_stop():
     assert host_bridge._s_host is None
     assert guest_proxy._l_proxy is None
     assert guest_proxy._s_guest is None
+
+
+# ============================================================================
+# T9.7: macOS VPN Bypass via IP_BOUND_IF (опция сокета 25)
+# ============================================================================
+
+
+def test_t9_7_1_get_primary_physical_interface_darwin():
+    """T9.7.1: Определение первичного физического интерфейса (en0 / en1) на macOS."""
+    from unittest.mock import patch
+    from src.client.p2p_tunnel import get_primary_physical_interface_darwin
+
+    # 1. Если не Darwin — возвращает None
+    with patch("sys.platform", "win32"):
+        assert get_primary_physical_interface_darwin() is None
+
+    # 2. Успешный парсинг scutil --nwi
+    fake_scutil_output = """Network information
+IPv4 network interface information
+   utun4 : flags      : 0x7 (IPv4,IPv6,DNS)
+           address    : 198.18.0.1
+     en0 : flags      : 0x5 (IPv4,DNS)
+           address    : 192.168.1.50
+           reach      : 0x00000002 (Reachable)
+"""
+    with patch("sys.platform", "darwin"):
+        with patch("subprocess.check_output", return_value=fake_scutil_output):
+            with patch("socket.if_nametoindex", return_value=4):
+                iface = get_primary_physical_interface_darwin()
+                assert iface == "en0"
+
+    # 3. Парсинг через netstat, если scutil не дал результат
+    fake_netstat_output = """Routing tables
+Destination        Gateway            Flags               Netif Expire
+default            link#19            UCSg                utun4       
+default            192.168.1.1        UGScIg                en1       
+"""
+    with patch("sys.platform", "darwin"):
+        with patch("subprocess.check_output", side_effect=[Exception("scutil failed"), fake_netstat_output]):
+            with patch("socket.if_nametoindex", return_value=5):
+                iface = get_primary_physical_interface_darwin()
+                assert iface == "en1"
+
+
+def test_t9_7_2_bind_socket_to_physical_interface_darwin():
+    """T9.7.2: Вызов setsockopt(IPPROTO_IP, 25, if_index) для привязки сокета."""
+    import struct
+    from unittest.mock import MagicMock, patch
+    from src.client.p2p_tunnel import bind_socket_to_physical_interface
+
+    mock_sock = MagicMock()
+
+    with patch("sys.platform", "darwin"):
+        with patch("src.client.p2p_tunnel.get_primary_physical_interface_darwin", return_value="en0"):
+            with patch("socket.if_nametoindex", return_value=7):
+                res = bind_socket_to_physical_interface(mock_sock)
+                assert res == "en0"
+                mock_sock.setsockopt.assert_called_once_with(
+                    socket.IPPROTO_IP,
+                    25,
+                    struct.pack("I", 7),
+                )
+
+
+def test_t9_7_3_bind_socket_skips_non_darwin_or_disabled():
+    """T9.7.3: На non-Darwin ОС или при FACTORIO_DISABLE_IP_BOUND_IF привязка не вызывается."""
+    from unittest.mock import MagicMock, patch
+    from src.client.p2p_tunnel import bind_socket_to_physical_interface
+
+    mock_sock = MagicMock()
+
+    # non-Darwin
+    with patch("sys.platform", "linux"):
+        res = bind_socket_to_physical_interface(mock_sock)
+        assert res is None
+        assert not mock_sock.setsockopt.called
+
+    # Darwin, но выключено флагом
+    with patch("sys.platform", "darwin"):
+        with patch.dict(os.environ, {"FACTORIO_DISABLE_IP_BOUND_IF": "1"}):
+            res = bind_socket_to_physical_interface(mock_sock)
+            assert res is None
+            assert not mock_sock.setsockopt.called
+
+
+def test_t9_7_4_detect_physical_lan_ip():
+    """T9.7.4: Определение локального LAN IP с фильтрацией петли и VPN-адресов."""
+    from unittest.mock import MagicMock, patch
+    from src.client.p2p_tunnel import detect_physical_lan_ip
+
+    # Успешное определение реального локального IP
+    mock_sock = MagicMock()
+    mock_sock.getsockname.return_value = ("192.168.1.100", 54321)
+
+    with patch("socket.socket", return_value=mock_sock):
+        with patch("src.client.p2p_tunnel.bind_socket_to_physical_interface"):
+            ip = detect_physical_lan_ip("1.1.1.1")
+            assert ip == "192.168.1.100"
+
+    # Фильтрация fake VPN IP (198.18.*)
+    mock_vpn_sock = MagicMock()
+    mock_vpn_sock.getsockname.return_value = ("198.18.0.1", 54321)
+    with patch("socket.socket", return_value=mock_vpn_sock):
+        with patch("src.client.p2p_tunnel.bind_socket_to_physical_interface"):
+            ip_vpn = detect_physical_lan_ip("1.1.1.1")
+            assert ip_vpn is None
+
+
+def test_t9_7_5_guest_proxy_only_binds_external_socket():
+    """T9.7.5: В GuestP2PProxy только внешний сокет _s_guest привязывается к интерфейсу, а _l_proxy нет."""
+    from unittest.mock import patch
+
+    bound_sockets = []
+
+    def mock_bind(sock):
+        bound_sockets.append(sock)
+        return "en0"
+
+    guest_proxy = GuestP2PProxy(
+        guest_name="TestBypass",
+        stun_host="127.0.0.1",
+        stun_port=_get_free_udp_port(),
+        proxy_port=_get_free_udp_port(),
+    )
+
+    with patch("src.client.p2p_tunnel.bind_socket_to_physical_interface", side_effect=mock_bind):
+        guest_proxy.start()
+        time.sleep(0.05)
+
+        try:
+            assert guest_proxy._s_guest in bound_sockets
+            assert guest_proxy._l_proxy not in bound_sockets
+        finally:
+            guest_proxy.stop()
+

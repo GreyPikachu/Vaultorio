@@ -14,6 +14,9 @@ import os
 import secrets
 import select
 import socket
+import struct
+import subprocess
+import sys
 import threading
 import time
 from dataclasses import dataclass, field
@@ -32,6 +35,106 @@ HEADER_DATA: bytes = MAGIC_PREFIX + TYPE_DATA        # 6 байт: b"FP2P\x01D"
 HEADER_RELAY: bytes = MAGIC_PREFIX + TYPE_RELAY      # 6 байт: b"FP2P\x01R"
 
 MAX_UDP_PACKET: int = 65507
+
+
+def get_primary_physical_interface_darwin() -> Optional[str]:
+    """Определяет имя первичного физического сетевого интерфейса на macOS (например, en0).
+
+    Исключает виртуальные интерфейсы VPN и прокси (utun*, ppp*, lo*, bridge*).
+    """
+    if sys.platform != "darwin":
+        return None
+
+    # 1. Попытка через scutil --nwi (официальная утилита конфигурации сети macOS)
+    try:
+        out = subprocess.check_output(["scutil", "--nwi"], text=True, timeout=1.0)
+        for line in out.splitlines():
+            stripped = line.strip()
+            if ":" in stripped:
+                name_part = stripped.split(":")[0].strip()
+                if (name_part.startswith("en") or name_part.startswith("eth")) and not name_part.startswith("utun"):
+                    try:
+                        socket.if_nametoindex(name_part)
+                        return name_part
+                    except Exception:
+                        pass
+    except Exception:
+        pass
+
+    # 2. Попытка через netstat -rn -f inet (поиск шлюза по умолчанию)
+    try:
+        out = subprocess.check_output(["netstat", "-rn", "-f", "inet"], text=True, timeout=1.0)
+        for line in out.splitlines():
+            parts = line.split()
+            if len(parts) >= 4 and parts[0] == "default" and "G" in parts[2]:
+                netif = parts[3]
+                if (netif.startswith("en") or netif.startswith("eth")) and not netif.startswith("utun"):
+                    try:
+                        socket.if_nametoindex(netif)
+                        return netif
+                    except Exception:
+                        pass
+    except Exception:
+        pass
+
+    # 3. Резервный перебор стандартных интерфейсов en0-en4
+    for candidate in ("en0", "en1", "en2", "en3", "en4"):
+        try:
+            socket.if_nametoindex(candidate)
+            return candidate
+        except Exception:
+            pass
+
+    return None
+
+
+def bind_socket_to_physical_interface(sock: socket.socket) -> Optional[str]:
+    """Привязывает внешний UDP-сокет к физическому интерфейсу на macOS (IP_BOUND_IF = 25).
+
+    Это гарантирует, что P2P-трафик и STUN-пакеты отправляются напрямую через физический
+    сетевой адаптер (Wi-Fi/Ethernet) в обход виртуальных VPN-туннелей (Shadowrocket, utun*),
+    снижая пинг с 800+ мс до 15–25 мс.
+
+    На других ОС или при ошибке вызова оставляет стандартную маршрутизацию без исключений.
+    """
+    if sys.platform != "darwin":
+        return None
+
+    if os.getenv("FACTORIO_DISABLE_IP_BOUND_IF") == "1":
+        return None
+
+    try:
+        iface = get_primary_physical_interface_darwin()
+        if not iface:
+            return None
+
+        if_idx = socket.if_nametoindex(iface)
+        # 25 = IP_BOUND_IF в macOS XNU sys/netinet/in.h
+        sock.setsockopt(socket.IPPROTO_IP, 25, struct.pack("I", if_idx))
+        logger.info(
+            f"Внешний сокет успешно привязан к физическому интерфейсу {iface} (index {if_idx}) для прямого обхода VPN."
+        )
+        return iface
+    except Exception as err:
+        logger.debug(f"Не удалось привязать сокет через IP_BOUND_IF: {err}")
+        return None
+
+
+def detect_physical_lan_ip(target_host: str = "1.1.1.1") -> Optional[str]:
+    """Определяет реальный локальный LAN IP-адрес на физическом интерфейсе в обход VPN."""
+    try:
+        temp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            bind_socket_to_physical_interface(temp_sock)
+            temp_sock.connect((target_host, 80))
+            ip = temp_sock.getsockname()[0]
+            if ip and not ip.startswith("127.") and not ip.startswith("198.18."):
+                return ip
+        finally:
+            temp_sock.close()
+    except Exception:
+        pass
+    return None
 
 
 def _configure_udp_socket(sock: socket.socket) -> None:
@@ -196,7 +299,11 @@ class HostP2PBridge:
 
         self._s_host = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         _configure_udp_socket(self._s_host)
+        bind_socket_to_physical_interface(self._s_host)
         self._s_host.bind(("0.0.0.0", 0))
+
+        if not self.local_ip:
+            self.local_ip = detect_physical_lan_ip(self.stun_host)
 
         self._stop_event.clear()
         self._thread = threading.Thread(target=self._worker_loop, name="HostP2PBridgeWorker", daemon=True)
@@ -604,10 +711,14 @@ class GuestP2PProxy:
         _configure_udp_socket(self._l_proxy)
         self._l_proxy.bind(("127.0.0.1", self.proxy_port))
 
-        # Внешний сокет для связи с VPS и Хостом
+        # Внешний сокет для связи с VPS и Хостом (обход VPN через физический адаптер)
         self._s_guest = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         _configure_udp_socket(self._s_guest)
+        bind_socket_to_physical_interface(self._s_guest)
         self._s_guest.bind(("0.0.0.0", 0))
+
+        if not self.local_ip:
+            self.local_ip = detect_physical_lan_ip(self.stun_host)
 
         self._stop_event.clear()
         self._thread = threading.Thread(target=self._worker_loop, name="GuestP2PProxyWorker", daemon=True)
