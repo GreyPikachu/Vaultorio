@@ -497,6 +497,10 @@ class FactorioWrapperInstaller:
         вызвано изнутри работающего процесса перехватчика.
         """
         try:
+            # На POSIX (macOS, Linux) заменяем файл атомарно без предварительного удаления:
+            if platform.system() != "Windows":
+                os.replace(str(core_bin), str(game_bin))
+                return
             game_bin.unlink(missing_ok=True)
             shutil.move(str(core_bin), str(game_bin))
             return

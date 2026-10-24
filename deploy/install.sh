@@ -36,16 +36,46 @@ echo "Найдена игра: $FOUND_GAME"
 
 # 2. Проверка Python 3
 PYTHON_BIN=""
-if command -v python3 >/dev/null 2>&1; then
-    PYTHON_BIN="python3"
-elif command -v python >/dev/null 2>&1; then
-    PYTHON_BIN="python"
+CANDIDATE_PYTHONS=(
+    "python3.13"
+    "python3.14"
+    "python3.12"
+    "python3"
+    "python"
+)
+
+# Предпочитаем Python с установленным tkinter
+for candidate in "${CANDIDATE_PYTHONS[@]}"; do
+    if command -v "$candidate" >/dev/null 2>&1; then
+        RESOLVED_PY=$(command -v "$candidate")
+        if "$RESOLVED_PY" -c "import tkinter" >/dev/null 2>&1; then
+            PYTHON_BIN="$RESOLVED_PY"
+            break
+        fi
+    fi
+done
+
+# Если ни в одном нет tkinter, берем доступный python3
+if [ -z "$PYTHON_BIN" ]; then
+    if command -v python3 >/dev/null 2>&1; then
+        PYTHON_BIN="python3"
+    elif command -v python >/dev/null 2>&1; then
+        PYTHON_BIN="python"
+    fi
 fi
 
 if [ -z "$PYTHON_BIN" ]; then
     echo "ОШИБКА: Python 3 не обнаружен на вашем Mac."
     echo "Установите Python 3 (через https://www.python.org или 'brew install python3') и запустите снова."
     exit 1
+fi
+
+# Проверка tkinter в выбранном Python
+if ! "$PYTHON_BIN" -c "import tkinter" >/dev/null 2>&1; then
+    if command -v brew >/dev/null 2>&1; then
+        echo "Установка графической библиотеки python-tk..."
+        brew install python-tk >/dev/null 2>&1 || true
+    fi
 fi
 
 echo "Используется Python: $($PYTHON_BIN --version) ($PYTHON_BIN)"
