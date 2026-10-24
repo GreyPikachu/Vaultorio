@@ -15,6 +15,7 @@ from src.server.logger import get_logger, setup_server_logging
 from src.server.session_manager import SessionLockManager, SessionState
 from src.server.storage import SaveStorageManager
 from src.server.stun_coordinator import StunCoordinatorProtocol, start_stun_coordinator
+from src.server.telegram_bot import TelegramBotService, TelegramBotSettings
 
 __version__ = "0.1.0"
 __all__ = [
@@ -33,4 +34,6 @@ __all__ = [
     "SessionState",
     "StunCoordinatorProtocol",
     "start_stun_coordinator",
+    "TelegramBotService",
+    "TelegramBotSettings",
 ]

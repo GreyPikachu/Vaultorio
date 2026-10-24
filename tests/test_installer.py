@@ -337,9 +337,10 @@ def test_t11_4_3_uninstall_windows_locked_file_safe_restore(win_game_dir: Path, 
             raise PermissionError("[WinError 5] Отказано в доступе: 'factorio.exe'")
         return original_unlink(self, missing_ok=missing_ok)
 
-    with patch.object(Path, "unlink", mock_unlink):
-        with patch.object(installer, "_schedule_deferred_deletion") as mock_sched_del:
-            uninst_report = installer.uninstall(game_dir=win_game_dir, system_override="Windows")
+    with patch("platform.system", return_value="Windows"):
+        with patch.object(Path, "unlink", mock_unlink):
+            with patch.object(installer, "_schedule_deferred_deletion") as mock_sched_del:
+                uninst_report = installer.uninstall(game_dir=win_game_dir, system_override="Windows")
 
             assert uninst_report["status"] == "uninstalled"
             # Оригинальный бинарник возвращен на место

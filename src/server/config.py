@@ -59,6 +59,11 @@ class ServerConfig:
         """Path to persistent device tokens and invite tickets JSON file."""
         return self.storage_dir / "auth_state.json"
 
+    @property
+    def telegram_state_path(self) -> Path:
+        """Path to persistent telegram bot state and configuration JSON file."""
+        return self.storage_dir / "telegram_state.json"
+
     def validate(self) -> None:
         """
         Validates all configuration attributes against system limits and safety policies.
