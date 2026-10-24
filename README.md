@@ -157,7 +157,7 @@ flowchart TD
 
 ### Развертывание на VPS
 
-Требования: Ubuntu 22.04+ / Debian 11+, Python 3.10+, свободные порты `8088/tcp` (HTTP API) и `14197/udp` (STUN Coordinator). Порты диапазона `20000:50000` для Hysteria 2 / Xray не затрагиваются и продолжают работать в штатном режиме.
+Требования: Ubuntu 22.04+ / Debian 11+, Python 3.10+ (системный пакет python3-venv устанавливается инсталлятором автоматически), свободные порты `8088/tcp` (HTTP API) и `14197/udp` (STUN Coordinator). Порты диапазона `20000:50000` для Hysteria 2 / Xray не затрагиваются и продолжают работать в штатном режиме.
 
 ```bash
 # Клонирование репозитория на сервере
@@ -170,7 +170,8 @@ sudo ./deploy/vps/install_vps.sh
 
 Генерация одноразового Кода Дружбы для подключения друга:
 ```bash
-python -m src.server.admin_cli create-invite --ttl-minutes 60 --passphrase "секретное_слово"
+cd /opt/factorio-hub
+./venv/bin/python3 -m src.server.admin_cli create-invite --ttl-minutes 60 --passphrase "секретное_слово"
 ```
 Команда выведет билет `FCT1-...`. Передайте этот код и секретное слово другу.
 

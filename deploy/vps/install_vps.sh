@@ -44,10 +44,10 @@ if [[ $EUID -ne 0 ]]; then
     exit 1
 fi
 
-command -v python3 >/dev/null 2>&1 || {
-    log_warn "Python 3 is not installed. Installing python3, python3-venv, and python3-pip..."
+if ! command -v python3 >/dev/null 2>&1 || ! python3 -m venv --help >/dev/null 2>&1; then
+    log_warn "Python 3 or python3-venv is missing. Installing python3, python3-venv, and python3-pip..."
     apt-get update -y && apt-get install -y python3 python3-venv python3-pip curl
-}
+fi
 
 command -v curl >/dev/null 2>&1 || {
     apt-get update -y && apt-get install -y curl
