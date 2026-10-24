@@ -198,7 +198,6 @@ class FirstRunSetupWindow:
         self.existing_config = existing_config
         self.is_already_configured = bool(self.existing_config and self.existing_config.is_configured())
 
-        self.step: str = "manage_world" if self.is_already_configured else "enter_invite"
         self.server_has_save: Optional[bool] = None
         self.inputs_card: Optional[Any] = None
         self.world_card: Optional[Any] = None
@@ -212,6 +211,11 @@ class FirstRunSetupWindow:
             except Exception as e:
                 logger.debug(f"Не удалось получить статус сервера при открытии окна: {e}")
                 self.server_has_save = True
+
+        if self.is_already_configured and self.server_has_save is False:
+            self.step = "select_initial_world"
+        else:
+            self.step = "manage_world" if self.is_already_configured else "enter_invite"
 
         self.result_config: Optional[ClientConfig] = None
         self.is_activating = False
@@ -602,9 +606,14 @@ class FirstRunSetupWindow:
             pady=8,
         )
 
+        world_title = (
+            "На сервере еще нет сохраненного мира. Выберите ваш мир для загрузки:"
+            if self.server_has_save is False
+            else "Активный мир на сервере:"
+        )
         self.world_title_lbl = tk.Label(
             self.world_card,
-            text="Активный мир на сервере:",
+            text=world_title,
             font=("Helvetica", 9, "bold"),
             fg=COLOR_TEXT,
             bg=COLOR_CARD,
@@ -710,7 +719,8 @@ class FirstRunSetupWindow:
             padx=12,
             pady=10,
         )
-        self.inputs_card.pack(fill=tk.X, pady=(0, 10))
+        if not (self.is_already_configured and self.server_has_save is False):
+            self.inputs_card.pack(fill=tk.X, pady=(0, 10))
 
         # Поле 1: Код Дружбы
         code_title = (
@@ -799,11 +809,13 @@ class FirstRunSetupWindow:
                 self.game_path_entry.bind("<KeyPress>", self._on_entry_key)
 
         # 6. Строка состояния (Status Bar)
-        initial_status = (
-            "Сервер уже подключен. Выберите мир и нажмите «Применить и запустить»."
-            if self.is_already_configured
-            else "Введите полученный Код Дружбы и секретное слово"
-        )
+        if self.is_already_configured:
+            if self.server_has_save is False:
+                initial_status = "Сервер подключен, но пуст. Выберите мир для загрузки."
+            else:
+                initial_status = "Сервер уже подключен. Выберите мир и нажмите «Применить и запустить»."
+        else:
+            initial_status = "Введите полученный Код Дружбы и секретное слово"
         self.status_var = tk.StringVar(value=initial_status)
         self.status_lbl = tk.Label(
             main_container,
@@ -873,7 +885,11 @@ class FirstRunSetupWindow:
         if self.installer_mode:
             action_text = "Установить и подключить"
         elif self.is_already_configured:
-            action_text = "Применить и запустить игру"
+            action_text = (
+                "Загрузить мир на сервер и играть"
+                if self.server_has_save is False
+                else "Применить и запустить игру"
+            )
         else:
             action_text = "Подключить и продолжить"
 
