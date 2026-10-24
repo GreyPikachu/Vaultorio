@@ -1059,8 +1059,9 @@ class FirstRunSetupWindow:
             self.result_config = cfg
             self._schedule_ui(self._on_publish_success)
         except Exception as exc:
-            logger.warning(f"Ошибка при публикации выбранного мира: {exc}")
-            self._schedule_ui(lambda: self._on_activation_error(exc))
+            err = exc
+            logger.warning(f"Ошибка при публикации выбранного мира: {err}")
+            self._schedule_ui(lambda e=err: self._on_activation_error(e))
 
     def _on_publish_success(self) -> None:
         """Обрабатывает успешную публикацию мира."""
@@ -1181,8 +1182,9 @@ class FirstRunSetupWindow:
             self._schedule_ui(lambda: self._transition_to_empty_server_world_selection(cfg, local_saves))
 
         except Exception as exc:
-            logger.warning(f"Ошибка при активации инвайт-кода: {exc}")
-            self._schedule_ui(lambda: self._on_activation_error(exc))
+            err = exc
+            logger.warning(f"Ошибка при активации инвайт-кода: {err}")
+            self._schedule_ui(lambda e=err: self._on_activation_error(e))
 
     def _on_activation_success(self, cfg: Optional[ClientConfig] = None) -> None:
         """Обрабатывает успешную активацию."""

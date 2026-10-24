@@ -69,6 +69,7 @@ class AuthManager:
         # Словарь учета неудачных попыток ввода для защиты от перебора: client_ip -> [timestamp, ...]
         self._failed_attempts: Dict[str, List[float]] = {}
         self._last_save_time: float = 0.0
+        self._last_loaded_mtime: float = 0.0
 
         self._load_state_from_disk()
 
@@ -86,12 +87,14 @@ class AuthManager:
                 return
 
             try:
+                mtime = self.state_file_path.stat().st_mtime
                 with open(self.state_file_path, "r", encoding="utf-8") as f:
                     data = json.load(f)
 
                 if isinstance(data, dict):
                     self._invites = data.get("invites", {})
                     self._trusted_devices = data.get("trusted_devices", {})
+                    self._last_loaded_mtime = mtime
                     logger.info(
                         f"Загружено состояние авторизации: инвайтов={len(self._invites)}, "
                         f"доверенных устройств={len(self._trusted_devices)}"
@@ -105,6 +108,17 @@ class AuthManager:
                 except Exception:
                     pass
                 self._persist_state_locked()
+
+    def _reload_if_modified_locked(self) -> None:
+        """Перечитывает состояние с диска, если файл был изменен внешним процессом (например, admin_cli)."""
+        try:
+            if self.state_file_path.is_file():
+                current_mtime = self.state_file_path.stat().st_mtime
+                if current_mtime > self._last_loaded_mtime:
+                    logger.info("Обнаружено изменение auth_state.json на диске. Выполняется автоматическая перезагрузка.")
+                    self._load_state_from_disk()
+        except Exception as e:
+            logger.debug(f"Ошибка проверки времени изменения {self.state_file_path}: {e}")
 
     def _persist_state_locked(self) -> None:
         """Атомарно сохраняет состояние инвайтов и устройств на диск через временный файл."""
@@ -132,6 +146,10 @@ class AuthManager:
 
             os.replace(temp_path, self.state_file_path)
             self._last_save_time = time.time()
+            try:
+                self._last_loaded_mtime = self.state_file_path.stat().st_mtime
+            except Exception:
+                pass
             logger.debug("Состояние авторизации успешно сохранено на диск.")
         except Exception as exc:
             logger.error(f"Ошибка сохранения состояния авторизации в {self.state_file_path}: {exc}")
@@ -249,11 +267,14 @@ class AuthManager:
             raise ValueError("Имя игрока (player_name) не может быть пустым.")
 
         with self._lock:
-            # 1. Проверка Rate Limit
+            # 1. Синхронизация с диском при внешних изменениях (например, от admin_cli)
+            self._reload_if_modified_locked()
+
+            # 2. Проверка Rate Limit
             if ip_addr:
                 self._check_rate_limit_locked(ip_addr)
 
-            # 2. Поиск билета
+            # 3. Поиск билета
             invite = self._invites.get(clean_ticket)
             if not invite:
                 self._record_failed_attempt_locked(ip_addr)
@@ -338,6 +359,7 @@ class AuthManager:
             return False
 
         with self._lock:
+            self._reload_if_modified_locked()
             # Ищем токен с защитой от тайминг-атак
             matched_record: Optional[Dict[str, Any]] = None
             for stored_token, record in self._trusted_devices.items():
