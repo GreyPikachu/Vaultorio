@@ -430,6 +430,29 @@ class TestHubClientIntegration(unittest.TestCase):
         dereg = self.hub_client.deregister_guest("Bob")
         self.assertTrue(dereg)
 
+    def test_t7_5_upload_save_with_progress_callback(self) -> None:
+        """T7.5: Выгрузка сейва с вызовом progress_callback."""
+        claim = self.hub_client.claim_host("Alice")
+        token = claim["session_token"]
+        self.hub_client.confirm_hosting(token)
+
+        save_path = self._create_valid_factorio_zip(Path(self.temp_dir) / "prog_save.zip")
+        progress_events = []
+
+        def on_prog(uploaded: int, total: int, speed: float) -> None:
+            progress_events.append((uploaded, total, speed))
+
+        res = self.hub_client.upload_save(
+            file_path=save_path,
+            session_token=token,
+            progress_callback=on_prog,
+        )
+        self.assertTrue(res["success"])
+        self.assertTrue(len(progress_events) >= 1)
+        last_uploaded, last_total, last_speed = progress_events[-1]
+        self.assertEqual(last_uploaded, last_total)
+        self.assertGreater(last_speed, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

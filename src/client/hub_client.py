@@ -21,7 +21,7 @@ import shutil
 import time
 import zipfile
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import httpx
 
@@ -42,6 +42,61 @@ def compute_file_sha256(file_path: Path | str, chunk_size: int = 65536) -> str:
                 break
             hasher.update(chunk)
     return hasher.hexdigest().lower()
+
+
+class ProgressFileReader:
+    """Обертка над файловым объектом с делегированием для отслеживания прогресса чтения/выгрузки."""
+
+    def __init__(
+        self,
+        file_obj: Any,
+        total_size: int,
+        callback: Optional[Callable[[int, int, float], None]] = None,
+    ):
+        self._file = file_obj
+        self.total_size = max(1, total_size)
+        self.callback = callback
+        self.read_bytes = 0
+        self.start_time = time.time()
+        self.last_update_time = 0.0
+
+    def read(self, size: int = -1) -> bytes:
+        chunk = self._file.read(size)
+        if chunk:
+            self.read_bytes += len(chunk)
+            now = time.time()
+            if self.callback and (now - self.last_update_time >= 0.04 or self.read_bytes >= self.total_size):
+                self.last_update_time = now
+                elapsed = max(0.001, now - self.start_time)
+                speed = self.read_bytes / elapsed
+                try:
+                    self.callback(self.read_bytes, self.total_size, speed)
+                except Exception:
+                    pass
+        return chunk
+
+    def seek(self, offset: int, whence: int = 0) -> int:
+        res = self._file.seek(offset, whence)
+        if whence == 0 and offset == 0:
+            self.read_bytes = 0
+            self.start_time = time.time()
+            self.last_update_time = 0.0
+        return res
+
+    def tell(self) -> int:
+        return self._file.tell()
+
+    def close(self) -> None:
+        self._file.close()
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._file, name)
+
+    def __enter__(self) -> ProgressFileReader:
+        return self
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        self.close()
 
 
 class HubClient:
@@ -437,6 +492,7 @@ class HubClient:
         target_path: Path | str,
         expected_sha: Optional[str] = None,
         chunk_size: int = 65536,
+        progress_callback: Optional[Callable[[int, int, float], None]] = None,
     ) -> Path:
         """Скачивает файл сохранения с сервера-сейфа по указанному пути.
 
@@ -447,6 +503,7 @@ class HubClient:
             target_path: Путь для сохранения скачанного файла.
             expected_sha: Ожидаемый SHA-256 хеш (если известен).
             chunk_size: Размер блока потокового чтения.
+            progress_callback: Функция обратного вызова (скачано_байт, всего_байт, скорость_байт_в_сек).
 
         Returns:
             Итоговый путь к скачанному файлу.
@@ -458,9 +515,34 @@ class HubClient:
         try:
             with self._client.stream("GET", "/download-save") as resp:
                 resp.raise_for_status()
+                content_len = resp.headers.get("content-length")
+                total_bytes = int(content_len) if content_len and content_len.isdigit() else 0
+                downloaded = 0
+                start_time = time.time()
+                last_update = 0.0
+
                 with part_path.open("wb") as out_f:
                     for chunk in resp.iter_bytes(chunk_size=chunk_size):
                         out_f.write(chunk)
+                        downloaded += len(chunk)
+                        now = time.time()
+                        if progress_callback and (
+                            now - last_update >= 0.04 or (total_bytes and downloaded >= total_bytes)
+                        ):
+                            last_update = now
+                            elapsed = max(0.001, now - start_time)
+                            speed = downloaded / elapsed
+                            try:
+                                progress_callback(downloaded, max(total_bytes, downloaded), speed)
+                            except Exception:
+                                pass
+
+            if progress_callback and total_bytes:
+                try:
+                    elapsed = max(0.001, time.time() - start_time)
+                    progress_callback(total_bytes, total_bytes, total_bytes / elapsed)
+                except Exception:
+                    pass
 
             if expected_sha:
                 downloaded_sha = compute_file_sha256(part_path)
@@ -493,6 +575,7 @@ class HubClient:
         release_on_success: bool = False,
         mod_list: Optional[list[dict[str, Any]]] = None,
         max_retries: int = 3,
+        progress_callback: Optional[Callable[[int, int, float], None]] = None,
     ) -> dict[str, Any]:
         """Выгружает файл сохранения на сервер-сейф с защитой от Split-Brain.
 
@@ -503,6 +586,7 @@ class HubClient:
                                 и после выгрузки переводит сервер в idle.
             mod_list: Манифест активных модов.
             max_retries: Число повторных попыток при сетевых сбоях.
+            progress_callback: Функция обратного вызова (отправлено_байт, всего_байт, скорость_байт_в_сек).
 
         Returns:
             Ответ сервера (словарь с success, sha256, backups_count, released).
@@ -515,6 +599,7 @@ class HubClient:
             raise ValueError(f"Файл {path} не является валидным ZIP-архивом.")
 
         expected_sha = compute_file_sha256(path)
+        total_size = path.stat().st_size
 
         # Если это финальная выгрузка, сначала выставляем статус uploading_final
         if release_on_success:
@@ -535,7 +620,12 @@ class HubClient:
                 )
 
                 with path.open("rb") as f:
-                    files = {"file": (path.name, f, "application/zip")}
+                    file_to_send: Any = (
+                        ProgressFileReader(f, total_size, progress_callback)
+                        if progress_callback is not None
+                        else f
+                    )
+                    files = {"file": (path.name, file_to_send, "application/zip")}
                     data = {
                         "session_token": session_token,
                         "release_on_success": "true" if release_on_success else "false",
@@ -580,6 +670,13 @@ class HubClient:
                     or session_data.get("state") == "idle"
                 )
                 result.setdefault("released", is_released)
+
+                if progress_callback:
+                    try:
+                        elapsed = max(0.001, time.time() - getattr(file_to_send, "start_time", time.time()))
+                        progress_callback(total_size, total_size, total_size / elapsed)
+                    except Exception:
+                        pass
                 logger.info(
                     f"Сейф успешно принял сохранение! Бэкапов на сервере: {result.get('backups_count', 0)}, "
                     f"слот освобожден: {result.get('released', False)}"

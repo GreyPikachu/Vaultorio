@@ -933,4 +933,46 @@ class TestGUIUninstallerIntegration(unittest.TestCase):
             self.assertEqual(exit_code, 0)
             mock_launch.assert_not_called()
 
+    def test_progress_bar_display_and_updates(self):
+        """Проверка отображения и корректного расчета шкалы прогресса, скорости и ETA."""
+        app = FirstRunSetupWindow(root=self.root, env=self.env, installer_mode=False)
+        self.root.update()
+
+        # Изначально прогресс-карточка скрыта
+        self.assertFalse(app.progress_card.winfo_ismapped())
+
+        # Отображение прогресса
+        app.show_progress("Выгрузка тестового мира...")
+        self.root.update()
+        self.assertTrue(app.progress_card.winfo_ismapped())
+        self.assertEqual(app.progress_title_lbl.cget("text"), "Выгрузка тестового мира...")
+        self.assertEqual(app.progress_bar["value"], 0)
+
+        # Обновление 50% с имитацией скорости 2 МБ/с
+        app.update_progress(
+            uploaded_bytes=25 * 1024 * 1024,
+            total_bytes=50 * 1024 * 1024,
+            speed_bytes_per_sec=2 * 1024 * 1024,
+        )
+        self.root.update()
+        self.assertAlmostEqual(app.progress_bar["value"], 50.0, places=1)
+        self.assertIn("25.0 / 50.0 МБ (50%)", app.progress_bytes_lbl.cget("text"))
+        self.assertIn("2.0 МБ/с", app.progress_speed_lbl.cget("text"))
+        self.assertIn("осталось ~12 сек", app.progress_speed_lbl.cget("text"))
+
+        # Завершение на 100%
+        app.update_progress(
+            uploaded_bytes=50 * 1024 * 1024,
+            total_bytes=50 * 1024 * 1024,
+            speed_bytes_per_sec=2 * 1024 * 1024,
+        )
+        self.root.update()
+        self.assertEqual(app.progress_bar["value"], 100.0)
+        self.assertIn("50.0 / 50.0 МБ (100%)", app.progress_bytes_lbl.cget("text"))
+
+        # Скрытие прогресса
+        app.hide_progress()
+        self.root.update()
+        self.assertFalse(app.progress_card.winfo_ismapped())
+
 

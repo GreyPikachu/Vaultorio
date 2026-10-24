@@ -35,6 +35,7 @@ def publish_selected_world_to_server(
     source_save_path: Optional[Path | str] = None,
     player_name: str = "Player",
     save_path: Optional[Path | str] = None,
+    on_progress: Optional[Callable[[int, int, float], None]] = None,
 ) -> dict[str, Any]:
     """Публикует выбранный локальный мир на сервер в качестве нового cloud_world.zip.
 
@@ -107,13 +108,17 @@ def publish_selected_world_to_server(
     if not session_token:
         raise RuntimeError("Сервер не вернул session_token при захвате слота.")
 
+    upload_kwargs: dict[str, Any] = {
+        "file_path": canonical_save,
+        "session_token": session_token,
+        "release_on_success": True,
+        "mod_list": env.get_active_mods_manifest(),
+    }
+    if on_progress is not None:
+        upload_kwargs["progress_callback"] = on_progress
+
     try:
-        upload_res = hub_client.upload_save(
-            file_path=canonical_save,
-            session_token=session_token,
-            release_on_success=True,
-            mod_list=env.get_active_mods_manifest(),
-        )
+        upload_res = hub_client.upload_save(**upload_kwargs)
         logger.info(f"Мир {path.name} успешно выгружен на сервер как {env.cloud_save_name}: {upload_res}")
         return {
             "published": True,
@@ -323,6 +328,17 @@ class FirstRunSetupWindow:
             self.root.option_add("*TCombobox*Listbox.foreground", COLOR_INPUT_FG)
             self.root.option_add("*TCombobox*Listbox.selectBackground", COLOR_ACCENT)
             self.root.option_add("*TCombobox*Listbox.selectForeground", "#ffffff")
+
+            # Стиль полосы прогресса Factorio Industrial (оранжевая на темном фоне)
+            self.style.configure(
+                "Dark.Horizontal.TProgressbar",
+                thickness=16,
+                troughcolor=COLOR_INPUT_BG,
+                background=COLOR_ACCENT,
+                bordercolor=COLOR_BORDER,
+                lightcolor=COLOR_ACCENT,
+                darkcolor=COLOR_ACCENT,
+            )
         except Exception as e:
             logger.warning(f"Ошибка настройки темного стиля ttk: {e}")
 
@@ -335,7 +351,7 @@ class FirstRunSetupWindow:
         self._setup_menus_and_shortcuts()
 
         width = 540
-        height = 640 if self.installer_mode else 540
+        height = 640 if self.installer_mode else 560
         if self.prompt_message:
             height += 40
 
@@ -798,11 +814,61 @@ class FirstRunSetupWindow:
             wraplength=490,
             justify="center",
         )
-        self.status_lbl.pack(fill=tk.X, pady=(4, 10))
+        self.status_lbl.pack(fill=tk.X, pady=(4, 6))
+
+        # 6.1 Карточка шкалы прогресса загрузки/выгрузки мира (изначально не упакована)
+        self.progress_card = tk.Frame(
+            main_container,
+            bg=COLOR_CARD,
+            relief=tk.SOLID,
+            bd=1,
+            padx=12,
+            pady=8,
+        )
+        self.progress_title_lbl = tk.Label(
+            self.progress_card,
+            text="Загрузка мира на сервер...",
+            font=("Helvetica", 9, "bold"),
+            fg=COLOR_TEXT,
+            bg=COLOR_CARD,
+        )
+        self.progress_title_lbl.pack(anchor="w", pady=(0, 4))
+
+        self.progress_bar = ttk.Progressbar(
+            self.progress_card,
+            style="Dark.Horizontal.TProgressbar",
+            orient="horizontal",
+            mode="determinate",
+            maximum=100,
+            value=0,
+        )
+        self.progress_bar.pack(fill=tk.X, pady=(0, 6))
+
+        self.progress_info_frame = tk.Frame(self.progress_card, bg=COLOR_CARD)
+        self.progress_info_frame.pack(fill=tk.X)
+
+        self.progress_bytes_lbl = tk.Label(
+            self.progress_info_frame,
+            text="0.0 / 0.0 МБ (0%)",
+            font=("Helvetica", 8),
+            fg=COLOR_TEXT_MUTED,
+            bg=COLOR_CARD,
+        )
+        self.progress_bytes_lbl.pack(side=tk.LEFT)
+
+        self.progress_speed_lbl = tk.Label(
+            self.progress_info_frame,
+            text="0.0 МБ/с",
+            font=("Helvetica", 8),
+            fg=COLOR_ACCENT,
+            bg=COLOR_CARD,
+        )
+        self.progress_speed_lbl.pack(side=tk.RIGHT)
 
         # 7. Кнопки действий
-        btn_frame = tk.Frame(main_container, bg=COLOR_BG)
-        btn_frame.pack(fill=tk.X, side=tk.BOTTOM)
+        self.btn_frame = tk.Frame(main_container, bg=COLOR_BG)
+        self.btn_frame.pack(fill=tk.X, side=tk.BOTTOM)
+        btn_frame = self.btn_frame
 
         if self.installer_mode:
             action_text = "Установить и подключить"
@@ -897,6 +963,87 @@ class FirstRunSetupWindow:
         """Безопасно обновляет строку состояния."""
         self.status_var.set(message)
         self.status_lbl.config(fg=color)
+
+    def show_progress(self, title: str = "Загрузка мира на сервер...") -> None:
+        """Отображает шкалу прогресса и сбрасывает индикаторы."""
+        if hasattr(self, "progress_title_lbl"):
+            self.progress_title_lbl.config(text=title)
+        if hasattr(self, "progress_bar"):
+            self.progress_bar["value"] = 0
+        if hasattr(self, "progress_bytes_lbl"):
+            self.progress_bytes_lbl.config(text="0.0 / 0.0 МБ (0%)")
+        if hasattr(self, "progress_speed_lbl"):
+            self.progress_speed_lbl.config(text="Подготовка...")
+        if hasattr(self, "progress_card"):
+            try:
+                if not self.progress_card.winfo_ismapped():
+                    self.progress_card.pack(fill=self.tk.X, pady=(0, 8))
+            except Exception:
+                pass
+
+    def hide_progress(self) -> None:
+        """Скрывает шкалу прогресса."""
+        if hasattr(self, "progress_card"):
+            try:
+                if self.progress_card.winfo_ismapped():
+                    self.progress_card.pack_forget()
+            except Exception:
+                pass
+
+    def update_progress(
+        self, uploaded_bytes: int, total_bytes: int, speed_bytes_per_sec: float
+    ) -> None:
+        """Обновляет шкалу прогресса, объем переданных данных, скорость и ETA."""
+        if not hasattr(self, "progress_card"):
+            return
+
+        if not self.progress_card.winfo_ismapped():
+            self.show_progress()
+
+        total = max(1, total_bytes)
+        uploaded = min(total, max(0, uploaded_bytes))
+        percent = (uploaded / total) * 100.0
+
+        if hasattr(self, "progress_bar"):
+            self.progress_bar["value"] = percent
+
+        uploaded_mb = uploaded / (1024 * 1024)
+        total_mb = total / (1024 * 1024)
+        if hasattr(self, "progress_bytes_lbl"):
+            self.progress_bytes_lbl.config(
+                text=f"{uploaded_mb:.1f} / {total_mb:.1f} МБ ({percent:.0f}%)"
+            )
+
+        # Форматирование скорости передачи
+        if speed_bytes_per_sec >= 1024 * 1024:
+            speed_str = f"{speed_bytes_per_sec / (1024 * 1024):.1f} МБ/с"
+        elif speed_bytes_per_sec >= 1024:
+            speed_str = f"{speed_bytes_per_sec / 1024:.0f} КБ/с"
+        else:
+            speed_str = f"{speed_bytes_per_sec:.0f} Б/с"
+
+        # Форматирование расчетного времени завершения (ETA)
+        if speed_bytes_per_sec > 1024 and total > uploaded:
+            remaining_bytes = total - uploaded
+            remaining_sec = max(1, int(remaining_bytes / speed_bytes_per_sec))
+            if remaining_sec < 60:
+                eta_str = f"осталось ~{remaining_sec} сек"
+            else:
+                eta_str = f"осталось ~{remaining_sec // 60} мин {remaining_sec % 60} сек"
+            speed_detail = f"{speed_str} • {eta_str}"
+        elif uploaded >= total:
+            speed_detail = "Завершено! Проверка..."
+        else:
+            speed_detail = speed_str
+
+        if hasattr(self, "progress_speed_lbl"):
+            self.progress_speed_lbl.config(text=speed_detail)
+
+    def _on_upload_progress_from_worker(
+        self, uploaded: int, total: int, speed: float
+    ) -> None:
+        """Потокобезопасно передает событие прогресса из фонового потока в UI-очередь."""
+        self._schedule_ui(lambda u=uploaded, t=total, s=speed: self.update_progress(u, t, s))
 
     def _on_cancel_click(self) -> None:
         """Закрывает окно без сохранения настроек (автономный запуск)."""
@@ -1048,6 +1195,9 @@ class FirstRunSetupWindow:
         try:
             if not cfg:
                 raise ValueError("Конфигурация клиента отсутствует.")
+            self._schedule_ui(
+                lambda s=save_name: self.show_progress(f"Выгрузка мира '{s}' на сервер...")
+            )
             hub_client = HubClient(config=cfg, http_client=self.http_client)
             save_path = self.env.saves_dir / save_name
             publish_selected_world_to_server(
@@ -1055,6 +1205,7 @@ class FirstRunSetupWindow:
                 hub_client=hub_client,
                 source_save_path=save_path,
                 player_name=self.player_name,
+                on_progress=self._on_upload_progress_from_worker,
             )
             self.result_config = cfg
             self._schedule_ui(self._on_publish_success)
@@ -1065,8 +1216,12 @@ class FirstRunSetupWindow:
 
     def _on_publish_success(self) -> None:
         """Обрабатывает успешную публикацию мира."""
+        if hasattr(self, "progress_bar"):
+            self.progress_bar["value"] = 100
+        if hasattr(self, "progress_speed_lbl"):
+            self.progress_speed_lbl.config(text="Завершено! Запуск игры...")
         self.set_status("Мир успешно опубликован на сервер! Запуск игры...", color=COLOR_SUCCESS)
-        self.root.after(600, self.root.destroy)
+        self.root.after(800, self.root.destroy)
 
     def _transition_to_empty_server_world_selection(
         self, cfg: ClientConfig, local_saves: list[Path]
@@ -1196,6 +1351,7 @@ class FirstRunSetupWindow:
     def _on_activation_error(self, exc: Exception) -> None:
         """Отображает понятную ошибку пользователю."""
         self.is_activating = False
+        self.hide_progress()
         self.action_btn.config(state="normal")
 
         err_str = str(exc)
