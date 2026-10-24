@@ -220,8 +220,106 @@ class FirstRunSetupWindow:
         # Определение папки игры
         self.game_path: Optional[Path] = self.env.game_root
 
+        self._configure_dark_theme()
         self._init_window()
         self._build_ui()
+
+    def _configure_dark_theme(self) -> None:
+        """Настраивает кроссплатформенный темный стиль виджетов через тему 'clam'."""
+        ttk = self.ttk
+        try:
+            self.style = ttk.Style(self.root)
+            if "clam" in self.style.theme_names():
+                self.style.theme_use("clam")
+
+            # Стиль основной акцентной кнопки (оранжевая)
+            self.style.configure(
+                "Accent.TButton",
+                background=COLOR_ACCENT,
+                foreground="#ffffff",
+                bordercolor=COLOR_ACCENT,
+                darkcolor=COLOR_ACCENT,
+                lightcolor=COLOR_ACCENT,
+                focuscolor="none",
+                font=("Helvetica", 10, "bold"),
+                padding=(10, 7),
+            )
+            self.style.map(
+                "Accent.TButton",
+                background=[
+                    ("disabled", "#5a4531"),
+                    ("pressed", COLOR_ACCENT_HOVER),
+                    ("active", COLOR_ACCENT_HOVER),
+                ],
+                foreground=[
+                    ("disabled", "#aaaaaa"),
+                    ("active", "#ffffff"),
+                ],
+            )
+
+            # Стиль второстепенных кнопок (темно-серые)
+            self.style.configure(
+                "Secondary.TButton",
+                background=COLOR_SECONDARY,
+                foreground=COLOR_TEXT,
+                bordercolor=COLOR_BORDER,
+                darkcolor=COLOR_SECONDARY,
+                lightcolor=COLOR_SECONDARY,
+                focuscolor="none",
+                font=("Helvetica", 9),
+                padding=(8, 4),
+            )
+            self.style.map(
+                "Secondary.TButton",
+                background=[
+                    ("disabled", "#2b2e33"),
+                    ("pressed", COLOR_SECONDARY_HOVER),
+                    ("active", COLOR_SECONDARY_HOVER),
+                ],
+                foreground=[
+                    ("disabled", "#777777"),
+                    ("active", "#ffffff"),
+                ],
+            )
+
+            # Стиль темного выпадающего списка
+            self.style.configure(
+                "Dark.TCombobox",
+                fieldbackground=COLOR_INPUT_BG,
+                background=COLOR_SECONDARY,
+                foreground=COLOR_INPUT_FG,
+                arrowcolor=COLOR_TEXT,
+                bordercolor=COLOR_BORDER,
+                lightcolor=COLOR_BORDER,
+                darkcolor=COLOR_BORDER,
+                selectbackground=COLOR_INPUT_BG,
+                selectforeground=COLOR_INPUT_FG,
+            )
+            self.style.map(
+                "Dark.TCombobox",
+                fieldbackground=[
+                    ("readonly", COLOR_INPUT_BG),
+                    ("disabled", COLOR_CARD),
+                ],
+                foreground=[
+                    ("readonly", COLOR_INPUT_FG),
+                    ("disabled", COLOR_TEXT_MUTED),
+                ],
+                selectbackground=[("readonly", COLOR_INPUT_BG)],
+                selectforeground=[("readonly", COLOR_INPUT_FG)],
+                background=[
+                    ("active", COLOR_SECONDARY_HOVER),
+                    ("readonly", COLOR_SECONDARY),
+                ],
+            )
+
+            # Настройка цветов выпадающего меню Listbox
+            self.root.option_add("*TCombobox*Listbox.background", COLOR_INPUT_BG)
+            self.root.option_add("*TCombobox*Listbox.foreground", COLOR_INPUT_FG)
+            self.root.option_add("*TCombobox*Listbox.selectBackground", COLOR_ACCENT)
+            self.root.option_add("*TCombobox*Listbox.selectForeground", "#ffffff")
+        except Exception as e:
+            logger.warning(f"Ошибка настройки темного стиля ttk: {e}")
 
     def _init_window(self) -> None:
         """Настраивает геометрические параметры и стили окна."""
@@ -252,27 +350,18 @@ class FirstRunSetupWindow:
         main_container = tk.Frame(self.root, bg=COLOR_BG, padx=20, pady=16)
         main_container.pack(fill=tk.BOTH, expand=True)
 
-        # 1. Шапка (Заголовок и подзаголовок)
+        # 1. Шапка (Заголовок)
         header_frame = tk.Frame(main_container, bg=COLOR_BG)
         header_frame.pack(fill=tk.X, pady=(0, 10))
 
         title_lbl = tk.Label(
             header_frame,
-            text="Factorio Co-op - Подключение к облачному миру",
+            text="Factorio Co-op",
             font=("Helvetica", 13, "bold"),
             fg=COLOR_TEXT,
             bg=COLOR_BG,
         )
         title_lbl.pack(anchor="w")
-
-        subtitle_lbl = tk.Label(
-            header_frame,
-            text="Синхронизация сохранений и P2P-кооператив без белых IP",
-            font=("Helvetica", 9),
-            fg=COLOR_TEXT_MUTED,
-            bg=COLOR_BG,
-        )
-        subtitle_lbl.pack(anchor="w", pady=(2, 0))
 
         # Опциональное информационное уведомление
         if self.prompt_message:
@@ -309,21 +398,12 @@ class FirstRunSetupWindow:
 
         player_title_lbl = tk.Label(
             player_card,
-            text=f"Никнейм из Factorio (player-data.json): {self.player_name}",
+            text=f"Игрок: {self.player_name}",
             font=("Helvetica", 10, "bold"),
             fg=COLOR_ACCENT,
             bg=COLOR_CARD,
         )
         player_title_lbl.pack(anchor="w")
-
-        player_sub_lbl = tk.Label(
-            player_card,
-            text="Никнейм подтягивается автоматически из настроек вашей игры Factorio",
-            font=("Helvetica", 8),
-            fg=COLOR_TEXT_MUTED,
-            bg=COLOR_CARD,
-        )
-        player_sub_lbl.pack(anchor="w", pady=(2, 0))
 
         # 3. Секция выбора активного мира сервера
         self.world_card = tk.Frame(
@@ -337,7 +417,7 @@ class FirstRunSetupWindow:
 
         self.world_title_lbl = tk.Label(
             self.world_card,
-            text="Активный мир на сервере (синхронизируется только он):",
+            text="Активный мир на сервере:",
             font=("Helvetica", 9, "bold"),
             fg=COLOR_TEXT,
             bg=COLOR_CARD,
@@ -368,13 +448,14 @@ class FirstRunSetupWindow:
             textvariable=self.world_combo_var,
             values=self.world_options,
             state="readonly",
+            style="Dark.TCombobox",
             font=("Helvetica", 9),
         )
         self.world_combo.pack(fill=tk.X, pady=(4, 4))
 
         self.world_hint_lbl = tk.Label(
             self.world_card,
-            text="Если в игре вы запустите любой другой мир, он останется чисто локальным и не затронет сервер",
+            text="Одиночные игры и другие карты не затрагивают сервер",
             font=("Helvetica", 8),
             fg=COLOR_TEXT_MUTED,
             bg=COLOR_CARD,
@@ -425,18 +506,11 @@ class FirstRunSetupWindow:
             )
             self.game_path_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6), ipady=3)
 
-            browse_btn = tk.Button(
+            browse_btn = ttk.Button(
                 path_row,
                 text="Обзор...",
-                font=("Helvetica", 9),
-                bg=COLOR_SECONDARY,
-                fg=COLOR_TEXT,
-                activebackground=COLOR_SECONDARY_HOVER,
-                activeforeground=COLOR_TEXT,
-                relief=tk.FLAT,
+                style="Secondary.TButton",
                 command=self._on_browse_game_dir,
-                padx=8,
-                pady=2,
             )
             browse_btn.pack(side=tk.RIGHT)
 
@@ -451,11 +525,11 @@ class FirstRunSetupWindow:
         )
         self.inputs_card.pack(fill=tk.X, pady=(0, 10))
 
-        # Поле 1: Одноразовый Код Дружбы
+        # Поле 1: Код Дружбы
         code_title = (
-            "Код Дружбы (оставьте пустым для сохранения текущего сервера):"
+            "Новый Код Дружбы (необязательно):"
             if self.is_already_configured
-            else "Одноразовый Код Дружбы (FCT1-...):"
+            else "Код Дружбы:"
         )
         code_lbl = tk.Label(
             self.inputs_card,
@@ -482,26 +556,19 @@ class FirstRunSetupWindow:
         )
         self.code_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6), ipady=4)
 
-        paste_btn = tk.Button(
+        paste_btn = ttk.Button(
             code_row,
             text="Вставить",
-            font=("Helvetica", 9),
-            bg=COLOR_SECONDARY,
-            fg=COLOR_TEXT,
-            activebackground=COLOR_SECONDARY_HOVER,
-            activeforeground=COLOR_TEXT,
-            relief=tk.FLAT,
+            style="Secondary.TButton",
             command=self._on_paste_code,
-            padx=8,
-            pady=2,
         )
         paste_btn.pack(side=tk.RIGHT)
 
         # Поле 2: Секретное слово
         pass_title = (
-            "Секретное слово (оставьте пустым для сохранения текущего сервера):"
+            "Секретное слово (необязательно):"
             if self.is_already_configured
-            else "Секретное слово (пароль инвайта):"
+            else "Секретное слово:"
         )
         pass_lbl = tk.Label(
             self.inputs_card,
@@ -530,18 +597,11 @@ class FirstRunSetupWindow:
         self.pass_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6), ipady=4)
 
         self.show_pass = False
-        self.toggle_pass_btn = tk.Button(
+        self.toggle_pass_btn = ttk.Button(
             pass_row,
             text="Показать",
-            font=("Helvetica", 9),
-            bg=COLOR_SECONDARY,
-            fg=COLOR_TEXT,
-            activebackground=COLOR_SECONDARY_HOVER,
-            activeforeground=COLOR_TEXT,
-            relief=tk.FLAT,
+            style="Secondary.TButton",
             command=self._on_toggle_pass,
-            padx=8,
-            pady=2,
         )
         self.toggle_pass_btn.pack(side=tk.RIGHT)
 
@@ -574,47 +634,29 @@ class FirstRunSetupWindow:
         else:
             action_text = "Подключить и продолжить"
 
-        self.action_btn = tk.Button(
+        self.action_btn = ttk.Button(
             btn_frame,
             text=action_text,
-            font=("Helvetica", 10, "bold"),
-            bg=COLOR_ACCENT,
-            fg="#ffffff",
-            activebackground=COLOR_ACCENT_HOVER,
-            activeforeground="#ffffff",
-            relief=tk.FLAT,
+            style="Accent.TButton",
             command=self._on_activate_click,
-            pady=7,
         )
         self.action_btn.pack(fill=tk.X, pady=(0, 6))
 
         # Дополнительные кнопки
         if self.installer_mode:
-            uninstall_btn = tk.Button(
+            uninstall_btn = ttk.Button(
                 btn_frame,
                 text="Удалить перехватчик (Вернуть чистую игру)",
-                font=("Helvetica", 9),
-                bg=COLOR_SECONDARY,
-                fg=COLOR_TEXT_MUTED,
-                activebackground=COLOR_SECONDARY_HOVER,
-                activeforeground=COLOR_TEXT,
-                relief=tk.FLAT,
+                style="Secondary.TButton",
                 command=self._on_uninstall_click,
-                pady=4,
             )
             uninstall_btn.pack(fill=tk.X)
         else:
-            cancel_btn = tk.Button(
+            cancel_btn = ttk.Button(
                 btn_frame,
                 text="Запустить игру автономно (без сервера)",
-                font=("Helvetica", 9),
-                bg=COLOR_SECONDARY,
-                fg=COLOR_TEXT_MUTED,
-                activebackground=COLOR_SECONDARY_HOVER,
-                activeforeground=COLOR_TEXT,
-                relief=tk.FLAT,
+                style="Secondary.TButton",
                 command=self._on_cancel_click,
-                pady=4,
             )
             cancel_btn.pack(fill=tk.X)
 

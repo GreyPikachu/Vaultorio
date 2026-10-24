@@ -209,7 +209,7 @@ class TestFirstRunSetupWindow(unittest.TestCase):
         # 1. 403 Forbidden
         app._on_activation_error(Exception("HTTPStatusError 403 Forbidden"))
         self.assertIn("Доступ запрещен сервером", app.status_var.get())
-        self.assertEqual(app.action_btn.cget("state"), "normal")
+        self.assertEqual(str(app.action_btn.cget("state")), "normal")
 
         # 2. 404 Not Found / Истек
         app._on_activation_error(Exception("Билет приглашения уже использован"))
@@ -650,3 +650,143 @@ class TestBuildFlagsAndNoEmojis(unittest.TestCase):
         )
         matches = emoji_pattern.findall(content)
         self.assertEqual(len(matches), 0, f"Обнаружены запрещенные эмодзи в setup_gui.py: {matches}")
+
+
+class TestFirstRunDarkModeAndCleanLabels(unittest.TestCase):
+    """Тестирование темной темы ttk и очистки меток интерфейса от технического шума (Задача 022)."""
+
+    def setUp(self):
+        self.temp_dir = Path(tempfile.mkdtemp(prefix="test_gui_dark_")).resolve()
+        self.user_data = (self.temp_dir / "userdata").resolve()
+        self.game_root = (self.temp_dir / "gameroot").resolve()
+        self.user_data.mkdir(parents=True)
+        self.game_root.mkdir(parents=True)
+
+        self.env = FactorioEnvironment(
+            custom_game_root=self.game_root,
+            custom_user_data_dir=self.user_data,
+        )
+        self.env.set_player_username("PikachuTester")
+        self.root = tk.Tk()
+        self.root.deiconify()
+
+    def tearDown(self):
+        try:
+            self.root.destroy()
+        except Exception:
+            pass
+        import shutil
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def _collect_all_widget_texts(self, widget) -> list[str]:
+        """Рекурсивно собирает текст со всех виджетов окна."""
+        texts = []
+        for child in widget.winfo_children():
+            try:
+                txt = child.cget("text")
+                if txt:
+                    texts.append(str(txt))
+            except Exception:
+                pass
+            texts.extend(self._collect_all_widget_texts(child))
+        return texts
+
+    def test_clean_labels_no_technical_noise(self):
+        """Проверка отсутствия технического шума: (player-data.json), P2P-кооператив и т.д."""
+        app = FirstRunSetupWindow(root=self.root, env=self.env, installer_mode=False)
+        self.root.update()
+
+        all_texts = self._collect_all_widget_texts(self.root)
+        full_text = " ".join(all_texts)
+
+        # 1. Запрещенные технические фразы
+        self.assertNotIn("(player-data.json)", full_text)
+        self.assertNotIn("P2P-кооператив", full_text)
+        self.assertNotIn("без белых IP", full_text)
+        self.assertNotIn("Никнейм подтягивается автоматически", full_text)
+
+        # 2. Карточка игрока строго 'Игрок: ...'
+        self.assertIn(f"Игрок: {app.player_name}", all_texts)
+
+        # 3. Чистые подписи полей ввода в начальном режиме
+        self.assertIn("Код Дружбы:", all_texts)
+        self.assertIn("Секретное слово:", all_texts)
+
+    def test_clean_labels_in_shift_reconfig_mode(self):
+        """Проверка чистых подписей полей в режиме повторного конфигурирования (Shift-режим)."""
+        cfg = ClientConfig(
+            hub_http_url="http://127.0.0.1:8088",
+            device_token="tok",
+            player_name="PikachuTester",
+        )
+        with patch.object(HubClient, "get_status", return_value={"save_exists": True}):
+            app = FirstRunSetupWindow(root=self.root, env=self.env, existing_config=cfg)
+            self.root.update()
+
+            all_texts = self._collect_all_widget_texts(self.root)
+            self.assertIn("Новый Код Дружбы (необязательно):", all_texts)
+            self.assertIn("Секретное слово (необязательно):", all_texts)
+            self.assertIn("Активный мир на сервере:", all_texts)
+
+    def test_ttk_buttons_and_dark_styles(self):
+        """Проверка использования ttk.Button и стилей Accent.TButton, Secondary.TButton, Dark.TCombobox."""
+        from tkinter import ttk
+
+        app = FirstRunSetupWindow(root=self.root, env=self.env, installer_mode=False)
+        self.root.update()
+
+        # 1. Кнопки должны быть экземплярами ttk.Button (не обычными tk.Button)
+        self.assertIsInstance(app.action_btn, ttk.Button)
+        self.assertIsInstance(app.toggle_pass_btn, ttk.Button)
+
+        def find_buttons(w):
+            res = []
+            for c in w.winfo_children():
+                if isinstance(c, ttk.Button):
+                    res.append(c)
+                res.extend(find_buttons(c))
+            return res
+
+        all_buttons = find_buttons(self.root)
+        self.assertGreaterEqual(len(all_buttons), 4)
+
+        # 2. Стили кнопок
+        self.assertEqual(str(app.action_btn.cget("style")), "Accent.TButton")
+        self.assertEqual(str(app.toggle_pass_btn.cget("style")), "Secondary.TButton")
+
+        # Все второстепенные кнопки (Вставить, Показать, Автономно) имеют Secondary.TButton
+        for btn in all_buttons:
+            if btn != app.action_btn:
+                self.assertEqual(str(btn.cget("style")), "Secondary.TButton")
+
+        # 3. Стиль селектора мира
+        self.assertIsInstance(app.world_combo, ttk.Combobox)
+        self.assertEqual(str(app.world_combo.cget("style")), "Dark.TCombobox")
+
+        # 4. Тема оформления ttk
+        self.assertEqual(app.style.theme_use(), "clam")
+
+    def test_installer_mode_buttons_are_ttk(self):
+        """В режиме installer_mode кнопка деинсталляции и выбора папки также ttk.Button со стилями."""
+        from tkinter import ttk
+
+        app = FirstRunSetupWindow(root=self.root, env=self.env, installer_mode=True)
+        self.root.update()
+
+        self.assertIsInstance(app.action_btn, ttk.Button)
+        self.assertEqual(str(app.action_btn.cget("style")), "Accent.TButton")
+
+        def find_buttons(w):
+            res = []
+            for c in w.winfo_children():
+                if isinstance(c, ttk.Button):
+                    res.append(c)
+                res.extend(find_buttons(c))
+            return res
+
+        all_buttons = find_buttons(self.root)
+        self.assertGreaterEqual(len(all_buttons), 4)
+        for btn in all_buttons:
+            style = str(btn.cget("style"))
+            self.assertIn(style, ["Accent.TButton", "Secondary.TButton"])
+
