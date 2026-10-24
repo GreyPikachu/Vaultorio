@@ -23,7 +23,9 @@ from src.client.hub_client import HubClient
 
 logger = logging.getLogger("factorio_client.setup_gui")
 
-DEFAULT_SERVER_WORLD_OPTION = "Оставить текущий мир сервера (cloud_world.zip)"
+DEFAULT_SERVER_WORLD_OPTION = "Текущий мир на сервере (не менять)"
+KEEP_CURRENT_SERVER_WORLD_OPTION = "Текущий мир на сервере (не менять)"
+SKIP_WORLD_UPLOAD_OPTION = "Не загружать (создать новый мир в игре)"
 
 
 def publish_selected_world_to_server(
@@ -190,6 +192,21 @@ class FirstRunSetupWindow:
         self.existing_config = existing_config
         self.is_already_configured = bool(self.existing_config and self.existing_config.is_configured())
 
+        self.step: str = "manage_world" if self.is_already_configured else "enter_invite"
+        self.server_has_save: Optional[bool] = None
+        self.inputs_card: Optional[Any] = None
+        self.world_card: Optional[Any] = None
+        self.world_title_lbl: Optional[Any] = None
+
+        if self.is_already_configured and self.existing_config:
+            try:
+                hub_client = HubClient(config=self.existing_config, http_client=self.http_client)
+                st = hub_client.get_status()
+                self.server_has_save = bool(st.get("save_exists") or st.get("save", {}).get("exists"))
+            except Exception as e:
+                logger.debug(f"Не удалось получить статус сервера при открытии окна: {e}")
+                self.server_has_save = True
+
         self.result_config: Optional[ClientConfig] = None
         self.is_activating = False
 
@@ -309,7 +326,7 @@ class FirstRunSetupWindow:
         player_sub_lbl.pack(anchor="w", pady=(2, 0))
 
         # 3. Секция выбора активного мира сервера
-        world_card = tk.Frame(
+        self.world_card = tk.Frame(
             main_container,
             bg=COLOR_CARD,
             relief=tk.SOLID,
@@ -317,16 +334,15 @@ class FirstRunSetupWindow:
             padx=12,
             pady=8,
         )
-        world_card.pack(fill=tk.X, pady=(0, 10))
 
-        world_title_lbl = tk.Label(
-            world_card,
+        self.world_title_lbl = tk.Label(
+            self.world_card,
             text="Активный мир на сервере (синхронизируется только он):",
             font=("Helvetica", 9, "bold"),
             fg=COLOR_TEXT,
             bg=COLOR_CARD,
         )
-        world_title_lbl.pack(anchor="w")
+        self.world_title_lbl.pack(anchor="w")
 
         local_saves = []
         try:
@@ -334,11 +350,21 @@ class FirstRunSetupWindow:
         except Exception as err:
             logger.warning(f"Ошибка получения списка сохранений: {err}")
 
-        self.world_options = [DEFAULT_SERVER_WORLD_OPTION] + [s.name for s in local_saves]
-        self.world_combo_var = tk.StringVar(value=DEFAULT_SERVER_WORLD_OPTION)
+        if self.is_already_configured:
+            if self.server_has_save is False:
+                self.world_options = [s.name for s in local_saves] + [SKIP_WORLD_UPLOAD_OPTION]
+                default_val = self.world_options[0] if self.world_options else SKIP_WORLD_UPLOAD_OPTION
+            else:
+                self.world_options = [KEEP_CURRENT_SERVER_WORLD_OPTION] + [s.name for s in local_saves]
+                default_val = KEEP_CURRENT_SERVER_WORLD_OPTION
+        else:
+            self.world_options = [s.name for s in local_saves] + [SKIP_WORLD_UPLOAD_OPTION]
+            default_val = self.world_options[0] if self.world_options else SKIP_WORLD_UPLOAD_OPTION
+
+        self.world_combo_var = tk.StringVar(value=default_val)
 
         self.world_combo = ttk.Combobox(
-            world_card,
+            self.world_card,
             textvariable=self.world_combo_var,
             values=self.world_options,
             state="readonly",
@@ -346,8 +372,8 @@ class FirstRunSetupWindow:
         )
         self.world_combo.pack(fill=tk.X, pady=(4, 4))
 
-        world_hint_lbl = tk.Label(
-            world_card,
+        self.world_hint_lbl = tk.Label(
+            self.world_card,
             text="Если в игре вы запустите любой другой мир, он останется чисто локальным и не затронет сервер",
             font=("Helvetica", 8),
             fg=COLOR_TEXT_MUTED,
@@ -355,7 +381,11 @@ class FirstRunSetupWindow:
             wraplength=480,
             justify="left",
         )
-        world_hint_lbl.pack(anchor="w")
+        self.world_hint_lbl.pack(anchor="w")
+
+        # Карточка выбора мира отображается сразу ТОЛЬКО если клиент уже настроен (запуск по Shift)
+        if self.is_already_configured:
+            self.world_card.pack(fill=tk.X, pady=(0, 10))
 
         # 4. Режим установщика: путь к игре
         if self.installer_mode:
@@ -411,7 +441,7 @@ class FirstRunSetupWindow:
             browse_btn.pack(side=tk.RIGHT)
 
         # 5. Блок ввода Кода Дружбы и секретного слова
-        inputs_card = tk.Frame(
+        self.inputs_card = tk.Frame(
             main_container,
             bg=COLOR_CARD,
             relief=tk.SOLID,
@@ -419,7 +449,7 @@ class FirstRunSetupWindow:
             padx=12,
             pady=10,
         )
-        inputs_card.pack(fill=tk.X, pady=(0, 10))
+        self.inputs_card.pack(fill=tk.X, pady=(0, 10))
 
         # Поле 1: Одноразовый Код Дружбы
         code_title = (
@@ -428,7 +458,7 @@ class FirstRunSetupWindow:
             else "Одноразовый Код Дружбы (FCT1-...):"
         )
         code_lbl = tk.Label(
-            inputs_card,
+            self.inputs_card,
             text=code_title,
             font=("Helvetica", 9, "bold"),
             fg=COLOR_TEXT,
@@ -436,7 +466,7 @@ class FirstRunSetupWindow:
         )
         code_lbl.pack(anchor="w")
 
-        code_row = tk.Frame(inputs_card, bg=COLOR_CARD)
+        code_row = tk.Frame(self.inputs_card, bg=COLOR_CARD)
         code_row.pack(fill=tk.X, pady=(4, 10))
 
         self.code_var = tk.StringVar()
@@ -474,7 +504,7 @@ class FirstRunSetupWindow:
             else "Секретное слово (пароль инвайта):"
         )
         pass_lbl = tk.Label(
-            inputs_card,
+            self.inputs_card,
             text=pass_title,
             font=("Helvetica", 9, "bold"),
             fg=COLOR_TEXT,
@@ -482,7 +512,7 @@ class FirstRunSetupWindow:
         )
         pass_lbl.pack(anchor="w")
 
-        pass_row = tk.Frame(inputs_card, bg=COLOR_CARD)
+        pass_row = tk.Frame(self.inputs_card, bg=COLOR_CARD)
         pass_row.pack(fill=tk.X, pady=(4, 4))
 
         self.pass_var = tk.StringVar()
@@ -671,20 +701,46 @@ class FirstRunSetupWindow:
         if self.is_activating:
             return
 
+        # Шаг 2: выбор мира для загрузки на пустой сервер
+        if self.step == "select_initial_world":
+            selected_world = self.world_combo_var.get().strip()
+            if not selected_world or selected_world == SKIP_WORLD_UPLOAD_OPTION:
+                logger.info("Пользователь выбрал не загружать мир на сервер.")
+                self.result_config = self.existing_config
+                self.set_status("Запуск игры...", color=COLOR_SUCCESS)
+                self.root.after(300, self.root.destroy)
+                return
+
+            self.is_activating = True
+            self.action_btn.config(state="disabled")
+            self.set_status(f"Загрузка мира '{selected_world}' на сервер...", color=COLOR_INFO)
+
+            worker = threading.Thread(
+                target=self._publish_world_worker,
+                args=(selected_world, self.existing_config),
+                daemon=True,
+                name="WorldPublishThread",
+            )
+            worker.start()
+            return
+
+        # Шаг manage_world (открытие по Shift с уже настроенным клиентом)
         code = self.code_var.get().strip()
         passphrase = self.pass_var.get().strip()
         selected_world = self.world_combo_var.get().strip()
 
-        # Если клиент уже настроен и пользователь не вводил новый код
         if self.is_already_configured and not code and not passphrase:
-            if selected_world == DEFAULT_SERVER_WORLD_OPTION:
-                # Ничего менять не нужно, просто запускаем игру
+            if selected_world in (
+                DEFAULT_SERVER_WORLD_OPTION,
+                KEEP_CURRENT_SERVER_WORLD_OPTION,
+                SKIP_WORLD_UPLOAD_OPTION,
+                "Оставить текущий мир сервера (cloud_world.zip)",
+            ):
                 self.result_config = self.existing_config
                 self.set_status("Настройки сохранены. Запуск игры...", color=COLOR_SUCCESS)
                 self.root.after(300, self.root.destroy)
                 return
 
-            # Пользователь выбрал другой локальный мир для публикации на сервер
             self.is_activating = True
             self.action_btn.config(state="disabled")
             self.set_status(f"Публикация мира '{selected_world}' на сервер...", color=COLOR_INFO)
@@ -754,11 +810,50 @@ class FirstRunSetupWindow:
         self.set_status("Мир успешно опубликован на сервер! Запуск игры...", color=COLOR_SUCCESS)
         self.root.after(600, self.root.destroy)
 
+    def _transition_to_empty_server_world_selection(
+        self, cfg: ClientConfig, local_saves: list[Path]
+    ) -> None:
+        """Переключает окно на Шаг 2: выбор локального мира для загрузки на пустой сервер."""
+        self.step = "select_initial_world"
+        self.is_activating = False
+        self.existing_config = cfg
+        self.result_config = cfg
+        self.is_already_configured = True
+
+        # Скрываем карточку ввода кода
+        if self.inputs_card:
+            self.inputs_card.pack_forget()
+
+        # Формируем список сохранений без заглушки сервера
+        options = [s.name for s in local_saves] + [SKIP_WORLD_UPLOAD_OPTION]
+        self.world_options = options
+        self.world_combo["values"] = options
+        self.world_combo_var.set(options[0])
+
+        if self.world_title_lbl:
+            self.world_title_lbl.config(
+                text="На сервере еще нет сохраненного мира. Выберите ваш мир для загрузки:"
+            )
+
+        # Показываем карточку выбора мира
+        if self.world_card and self.world_card.winfo_manager() != "pack":
+            self.world_card.pack(fill=self.tk.X, pady=(0, 10))
+
+        # Обновляем кнопку действия и статус
+        self.action_btn.config(
+            text="Загрузить мир на сервер и играть",
+            state="normal",
+        )
+        self.set_status(
+            "Сервер подключен! Выберите мир, который нужно загрузить на сервер.",
+            color=COLOR_SUCCESS,
+        )
+
     def _activate_worker(
         self,
         code: str,
         passphrase: str,
-        selected_world: str = DEFAULT_SERVER_WORLD_OPTION,
+        selected_world: Optional[str] = None,
     ) -> None:
         """Выполняет сетевой запрос активации в фоновом потоке."""
         try:
@@ -774,23 +869,42 @@ class FirstRunSetupWindow:
             if self.installer_mode and self.on_install_callback and self.game_path:
                 self.on_install_callback(self.game_path, self.player_name, cfg)
 
-            # Если при первичной настройке пользователь выбрал локальный мир для загрузки
-            if selected_world and selected_world != DEFAULT_SERVER_WORLD_OPTION:
-                save_path = self.env.saves_dir / selected_world
-                if save_path.is_file():
-                    try:
-                        hub_client = HubClient(config=cfg, http_client=self.http_client)
-                        publish_selected_world_to_server(
-                            env=self.env,
-                            hub_client=hub_client,
-                            source_save_path=save_path,
-                            player_name=self.player_name,
-                        )
-                    except Exception as pub_err:
-                        logger.warning(f"Мир не удалось опубликовать сразу при активации: {pub_err}")
+            # Проверяем наличие сохранения на сервере
+            server_has_save = False
+            try:
+                hub_client = HubClient(config=cfg, http_client=self.http_client)
+                st = hub_client.get_status()
+                server_has_save = bool(st.get("save_exists") or st.get("save", {}).get("exists"))
+            except Exception as st_err:
+                logger.warning(f"Не удалось проверить статус сохранения на сервере: {st_err}")
 
+            self.server_has_save = server_has_save
             self.result_config = cfg
-            self.root.after(0, self._on_activation_success)
+            self.existing_config = cfg
+            self.is_already_configured = True
+
+            # Случай А1: на сервере уже есть мир -> мгновенный запуск
+            if server_has_save:
+                logger.info("На сервере уже есть активный мир. Селектор пропускается.")
+                self.root.after(0, self._on_activation_success)
+                return
+
+            # Случай А2: сервер пустой -> проверяем локальные сохранения
+            local_saves = []
+            try:
+                local_saves = self.env.list_local_saves(include_cloud_world=False)
+            except Exception as l_err:
+                logger.warning(f"Ошибка получения списка сохранений: {l_err}")
+
+            if not local_saves:
+                logger.info("Локальных сохранений нет. Запуск игры для создания нового мира.")
+                self.root.after(0, self._on_activation_success)
+                return
+
+            # Есть локальные сохранения -> переход на Шаг 2 в UI-потоке
+            logger.info(f"Сервер пуст, найдено {len(local_saves)} локальных сохранений. Переход на Шаг 2.")
+            self.root.after(0, lambda: self._transition_to_empty_server_world_selection(cfg, local_saves))
+
         except Exception as exc:
             logger.warning(f"Ошибка при активации инвайт-кода: {exc}")
             self.root.after(0, lambda: self._on_activation_error(exc))

@@ -37,6 +37,9 @@ from src.client.setup_gui import (
     COLOR_ERROR,
     COLOR_INFO,
     COLOR_SUCCESS,
+    DEFAULT_SERVER_WORLD_OPTION,
+    KEEP_CURRENT_SERVER_WORLD_OPTION,
+    SKIP_WORLD_UPLOAD_OPTION,
     FirstRunSetupWindow,
     run_first_time_setup_gui,
 )
@@ -60,7 +63,7 @@ class TestFirstRunSetupWindow(unittest.TestCase):
 
         # Создаем tk.Tk в скрытом режиме без вывода на экран
         self.root = tk.Tk()
-        self.root.withdraw()
+        self.root.deiconify()
 
     def tearDown(self):
         try:
@@ -242,6 +245,206 @@ class TestFirstRunSetupWindow(unittest.TestCase):
              patch("tkinter.messagebox.showinfo"):
             app._on_uninstall_click()
             mock_uninstall.assert_called_once_with(self.game_root)
+
+
+class TestFirstRunConditionalWorldSelector(unittest.TestCase):
+    """Тесты для Задачи 021: условный двухшаговый выбор мира и скрытие заглушки."""
+
+    def setUp(self):
+        self.temp_dir = Path(tempfile.mkdtemp(prefix="test_gui_step2_")).resolve()
+        self.user_data = (self.temp_dir / "userdata").resolve()
+        self.game_root = (self.temp_dir / "gameroot").resolve()
+        self.saves_dir = (self.user_data / "saves").resolve()
+        self.user_data.mkdir(parents=True)
+        self.game_root.mkdir(parents=True)
+        self.saves_dir.mkdir(parents=True)
+
+        self.env = FactorioEnvironment(
+            custom_game_root=self.game_root,
+            custom_user_data_dir=self.user_data,
+        )
+        self.env.set_player_username("PikachuTester")
+
+        self.root = tk.Tk()
+        self.root.deiconify()
+
+    def tearDown(self):
+        try:
+            self.root.destroy()
+        except Exception:
+            pass
+        import shutil
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def _create_save(self, name: str) -> Path:
+        import zipfile
+        p = self.saves_dir / name
+        with zipfile.ZipFile(p, "w") as zf:
+            zf.writestr("level.dat", b"dummy_content")
+        return p
+
+    def test_first_run_world_card_is_hidden_initially(self):
+        """Карточка выбора мира скрыта при первом открытии (до подключения)."""
+        app = FirstRunSetupWindow(root=self.root, env=self.env, installer_mode=False)
+        self.root.update()
+
+        self.assertFalse(app.world_card.winfo_ismapped())
+        self.assertTrue(app.inputs_card.winfo_ismapped())
+        self.assertEqual(app.step, "enter_invite")
+        self.assertNotIn("Оставить текущий мир сервера (cloud_world.zip)", app.world_options)
+        self.assertEqual(app.action_btn.cget("text"), "Подключить и продолжить")
+
+    @patch("src.client.setup_gui.HubClient.activate_with_invite_code")
+    def test_activation_server_has_save_skips_step2(self, mock_activate):
+        """Если на сервере уже есть мир (save_exists=True), селектор не отображается."""
+        mock_cfg = ClientConfig(
+            hub_http_url="http://127.0.0.1:8088",
+            device_token="dev_tok_123",
+            player_name="PikachuTester",
+        )
+        mock_activate.return_value = mock_cfg
+        self._create_save("MyBase.zip")
+
+        app = FirstRunSetupWindow(root=self.root, env=self.env, installer_mode=False)
+        self.root.update()
+
+        with patch.object(HubClient, "get_status", return_value={"save_exists": True}):
+            app._activate_worker("FCT1-CODE", "secret")
+            self.root.update()
+
+        self.assertTrue(app.server_has_save)
+        self.assertEqual(app.step, "enter_invite")
+        self.assertFalse(app.world_card.winfo_ismapped())
+        self.assertIn("Готово! Сервер подключен", app.status_var.get())
+        self.assertEqual(app.result_config, mock_cfg)
+
+    @patch("src.client.setup_gui.HubClient.activate_with_invite_code")
+    def test_activation_server_empty_no_local_saves_starts_game_directly(self, mock_activate):
+        """Если сервер пустой и локальных сохранений нет, игра запускается сразу."""
+        mock_cfg = ClientConfig(
+            hub_http_url="http://127.0.0.1:8088",
+            device_token="dev_tok_123",
+            player_name="PikachuTester",
+        )
+        mock_activate.return_value = mock_cfg
+
+        app = FirstRunSetupWindow(root=self.root, env=self.env, installer_mode=False)
+        self.root.update()
+
+        with patch.object(HubClient, "get_status", return_value={"save_exists": False}):
+            app._activate_worker("FCT1-CODE", "secret")
+            self.root.update()
+
+        self.assertFalse(app.server_has_save)
+        self.assertEqual(app.step, "enter_invite")
+        self.assertFalse(app.world_card.winfo_ismapped())
+        self.assertIn("Готово! Сервер подключен", app.status_var.get())
+
+    @patch("src.client.setup_gui.HubClient.activate_with_invite_code")
+    def test_activation_server_empty_with_local_saves_transitions_to_step2(self, mock_activate):
+        """Если сервер пустой и есть локальные сейвы, окно переходит на Шаг 2."""
+        mock_cfg = ClientConfig(
+            hub_http_url="http://127.0.0.1:8088",
+            device_token="dev_tok_123",
+            player_name="PikachuTester",
+        )
+        mock_activate.return_value = mock_cfg
+        self._create_save("Судные дни.zip")
+
+        app = FirstRunSetupWindow(root=self.root, env=self.env, installer_mode=False)
+        self.root.update()
+
+        with patch.object(HubClient, "get_status", return_value={"save_exists": False}):
+            app._activate_worker("FCT1-CODE", "secret")
+            self.root.update()
+
+        self.assertEqual(app.step, "select_initial_world")
+        self.assertFalse(app.inputs_card.winfo_ismapped())
+        self.assertTrue(app.world_card.winfo_ismapped())
+        self.assertEqual(
+            app.world_title_lbl.cget("text"),
+            "На сервере еще нет сохраненного мира. Выберите ваш мир для загрузки:",
+        )
+        self.assertEqual(app.world_options, ["Судные дни.zip", SKIP_WORLD_UPLOAD_OPTION])
+        self.assertEqual(app.world_combo_var.get(), "Судные дни.zip")
+        self.assertEqual(app.action_btn.cget("text"), "Загрузить мир на сервер и играть")
+        self.assertIn("Сервер подключен! Выберите мир", app.status_var.get())
+
+    def test_step2_skip_upload_action(self):
+        """На Шаге 2 выбор «Не загружать» сохраняет конфиг и запускает игру без выгрузки."""
+        self._create_save("Судные дни.zip")
+        app = FirstRunSetupWindow(root=self.root, env=self.env, installer_mode=False)
+        self.root.update()
+
+        mock_cfg = ClientConfig(
+            hub_http_url="http://127.0.0.1:8088",
+            device_token="tok",
+            player_name="PikachuTester",
+        )
+        app._transition_to_empty_server_world_selection(mock_cfg, [self.saves_dir / "Судные дни.zip"])
+        self.root.update()
+
+        app.world_combo_var.set(SKIP_WORLD_UPLOAD_OPTION)
+
+        with patch("src.client.setup_gui.publish_selected_world_to_server") as mock_pub:
+            app._on_activate_click()
+            mock_pub.assert_not_called()
+
+        self.assertEqual(app.result_config, mock_cfg)
+        self.assertIn("Запуск игры...", app.status_var.get())
+
+    def test_step2_publish_selected_save_action(self):
+        """На Шаге 2 выбор сейва запускает фоновую выгрузку на сервер."""
+        save_path = self._create_save("Судные дни.zip")
+        app = FirstRunSetupWindow(root=self.root, env=self.env, installer_mode=False)
+        self.root.update()
+
+        mock_cfg = ClientConfig(
+            hub_http_url="http://127.0.0.1:8088",
+            device_token="tok",
+            player_name="PikachuTester",
+        )
+        app._transition_to_empty_server_world_selection(mock_cfg, [save_path])
+        self.root.update()
+
+        app.world_combo_var.set("Судные дни.zip")
+
+        with patch("src.client.setup_gui.publish_selected_world_to_server") as mock_pub:
+            mock_pub.return_value = {"published": True}
+            app._publish_world_worker("Судные дни.zip", mock_cfg)
+            mock_pub.assert_called_once()
+            self.root.update()
+
+        self.assertEqual(app.result_config, mock_cfg)
+        self.assertIn("Мир успешно опубликован на сервер", app.status_var.get())
+
+    def test_shift_mode_with_server_empty_vs_has_save(self):
+        """При запуске по Shift селектор отражает статус наличия мира на сервере."""
+        self._create_save("Base1.zip")
+        cfg = ClientConfig(
+            hub_http_url="http://127.0.0.1:8088",
+            device_token="tok",
+            player_name="PikachuTester",
+        )
+
+        with patch.object(HubClient, "get_status", return_value={"save_exists": False}):
+            app_empty = FirstRunSetupWindow(root=self.root, env=self.env, existing_config=cfg)
+            self.root.update()
+            self.assertTrue(app_empty.world_card.winfo_ismapped())
+            self.assertNotIn(KEEP_CURRENT_SERVER_WORLD_OPTION, app_empty.world_options)
+            self.assertEqual(app_empty.world_options[0], "Base1.zip")
+            self.assertEqual(app_empty.world_options[-1], SKIP_WORLD_UPLOAD_OPTION)
+
+        with patch.object(HubClient, "get_status", return_value={"save_exists": True}):
+            root_has = tk.Tk()
+            try:
+                app_has = FirstRunSetupWindow(root=root_has, env=self.env, existing_config=cfg)
+                root_has.update()
+                self.assertTrue(app_has.world_card.winfo_ismapped())
+                self.assertEqual(app_has.world_options[0], KEEP_CURRENT_SERVER_WORLD_OPTION)
+                self.assertIn("Base1.zip", app_has.world_options)
+            finally:
+                root_has.destroy()
 
 
 class TestSetupGUIRunner(unittest.TestCase):
