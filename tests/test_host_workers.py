@@ -582,7 +582,7 @@ def test_t017_1_parse_loaded_map_from_log():
     # 1. Unix-путь
     unix_log = (
         "0.000 Initializing Factorio...\n"
-        "1.234 Loading map /Users/test/Library/Application Support/factorio/saves/cloud_world.zip: 789123 bytes.\n"
+        "1.234 Loading map /Users/gamer/Library/Application Support/factorio/saves/cloud_world.zip: 789123 bytes.\n"
         "1.500 Map version 1.1.100\n"
     )
     assert parse_loaded_map_from_log(unix_log) == "cloud_world.zip"
@@ -640,7 +640,7 @@ def test_t017_2_detector_releases_host_on_non_cloud_map(tmp_path: Path):
 
     # Игрок загружает личную карту
     with open(log_file, "a", encoding="utf-8") as f:
-        f.write("1.234 Loading map /Users/test/saves/MyPersonalBase.zip: 555555 bytes.\n")
+        f.write("1.234 Loading map /Users/gamer/saves/MyPersonalBase.zip: 555555 bytes.\n")
 
     res = detector.check_once()
     assert res is False

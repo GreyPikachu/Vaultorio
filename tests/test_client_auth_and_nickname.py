@@ -293,7 +293,7 @@ class TestZeroHardcodeGrep(unittest.TestCase):
 
     def test_zero_real_ip_occurrences_in_src_client(self):
         """Ни один файл в src/client/ не должен содержать реальный IP-адрес владельца."""
-        client_dir = Path("/Users/test/LittleProjects/FactorioSetup/src/client")
+        client_dir = Path(__file__).resolve().parent.parent / "src" / "client"
         real_ip = ".".join(["45", "91", "248", "78"])
 
         matches = []
