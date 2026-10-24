@@ -87,12 +87,12 @@ flowchart TD
         G_Proxy["GuestP2PProxy (127.0.0.1:34198)"]
     end
 
-    H_Wrapper -->|1. Захват слота Хоста| SessionLock
-    H_Sync -->|2. Синхронизация cloud_world.zip| Safe
-    H_Bridge <-->|3. STUN Hole Punching| STUN
-    G_Proxy <-->|3. STUN Hole Punching| STUN
-    H_Bridge <===>|4. Прямой P2P UDP туннель (15-25 мс)| G_Proxy
-    G_Proxy -->|5. Локальный проброс трафика| G_Game
+    H_Wrapper -->|"1. Захват слота Хоста"| SessionLock
+    H_Sync -->|"2. Синхронизация cloud_world.zip"| Safe
+    H_Bridge <-->|"3. STUN Hole Punching"| STUN
+    G_Proxy <-->|"3. STUN Hole Punching"| STUN
+    H_Bridge <-->|"4. Прямой P2P UDP туннель 15-25 мс"| G_Proxy
+    G_Proxy -->|"5. Локальный проброс трафика"| G_Game
 ```
 
 ## Ключевые механизмы защиты (Защита от Split-Brain)
@@ -161,7 +161,7 @@ flowchart TD
 
 ```bash
 # Клонирование репозитория на сервере
-git clone <URL_РЕПОЗИТОРИЯ> /opt/factorio-setup
+git clone https://github.com/GreyPikachu/Vaultorio.git /opt/factorio-setup
 cd /opt/factorio-setup
 
 # Автоматическая установка и запуск systemd-сервиса (лимит памяти 64 МБ)
