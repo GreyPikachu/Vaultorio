@@ -19,6 +19,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import tempfile
@@ -974,5 +975,190 @@ class TestGUIUninstallerIntegration(unittest.TestCase):
         app.hide_progress()
         self.root.update()
         self.assertFalse(app.progress_card.winfo_ismapped())
+
+
+class TestGUISubprocessIsolationAndCleanClose(unittest.TestCase):
+    """Тесты изоляции GUI в дочернем процессе и чистого закрытия окна (Задача 027)."""
+
+    def setUp(self):
+        self.tmp_dir = tempfile.TemporaryDirectory()
+        self.tmp_path = Path(self.tmp_dir.name)
+        self.env = FactorioEnvironment(custom_user_data_dir=self.tmp_path)
+        self.root = tk.Tk()
+        self.root.withdraw()
+
+    def tearDown(self):
+        try:
+            self.root.destroy()
+        except Exception:
+            pass
+        self.tmp_dir.cleanup()
+
+    def test_close_window_cleanly_calls_withdraw_and_destroy(self):
+        """Проверяет принудительное скрытие (withdraw) и очистку Cocoa-очереди при закрытии окна."""
+        app = FirstRunSetupWindow(
+            root=self.root,
+            env=self.env,
+            config_path=self.tmp_path / "sync_cfg.json",
+        )
+
+        with patch.object(self.root, "withdraw") as mock_withdraw, \
+             patch.object(self.root, "update_idletasks") as mock_idletasks, \
+             patch.object(self.root, "quit") as mock_quit, \
+             patch.object(self.root, "destroy") as mock_destroy:
+            app._close_window_cleanly()
+
+            self.assertTrue(app._closing)
+            mock_withdraw.assert_called_once()
+            mock_idletasks.assert_called_once()
+            mock_quit.assert_called_once()
+            mock_destroy.assert_called_once()
+
+    def test_poll_ui_queue_bails_out_when_closing(self):
+        """Проверяет, что при флаге _closing опрос UI-очереди прекращается."""
+        app = FirstRunSetupWindow(
+            root=self.root,
+            env=self.env,
+            config_path=self.tmp_path / "sync_cfg.json",
+        )
+        app._closing = True
+
+        with patch.object(self.root, "after") as mock_after:
+            app._poll_ui_queue()
+            mock_after.assert_not_called()
+
+    def test_run_setup_gui_in_subprocess_success(self):
+        """Проверяет запуск изолированного подпроцесса GUI и парсинг ClientConfig."""
+        from src.client.setup_gui import run_setup_gui_in_subprocess
+
+        def fake_subprocess_run(cmd, env=None, check=False):
+            # Извлекаем путь к result.json из аргументов команды
+            result_file_path = None
+            for idx, arg in enumerate(cmd):
+                if arg == "--subprocess-result" and idx + 1 < len(cmd):
+                    result_file_path = Path(cmd[idx + 1])
+                    break
+                if arg == "--wrapper-internal-setup-gui" and idx + 2 < len(cmd):
+                    result_file_path = Path(cmd[idx + 2])
+                    break
+
+            if result_file_path:
+                payload = {
+                    "status": "ok",
+                    "config": {
+                        "hub_http_url": "http://10.20.30.40:8088",
+                        "device_token": "subproc_token_123",
+                        "player_name": "SubprocPlayer",
+                    },
+                    "was_uninstalled": False,
+                }
+                result_file_path.write_text(json.dumps(payload), encoding="utf-8")
+
+            res_mock = MagicMock()
+            res_mock.returncode = 0
+            return res_mock
+
+        with patch("subprocess.run", side_effect=fake_subprocess_run):
+            cfg = run_setup_gui_in_subprocess(
+                env=self.env,
+                config_path=self.tmp_path / "sync_cfg.json",
+            )
+
+        self.assertIsNotNone(cfg)
+        self.assertEqual(cfg.device_token, "subproc_token_123")
+        self.assertEqual(cfg.player_name, "SubprocPlayer")
+        self.assertFalse(cfg.was_uninstalled)
+
+    def test_run_setup_gui_in_subprocess_uninstalled(self):
+        """Проверяет обработку статуса uninstalled из дочернего процесса."""
+        from src.client.setup_gui import run_setup_gui_in_subprocess
+
+        def fake_subprocess_uninstall(cmd, env=None, check=False):
+            result_file_path = None
+            for idx, arg in enumerate(cmd):
+                if arg == "--subprocess-result" and idx + 1 < len(cmd):
+                    result_file_path = Path(cmd[idx + 1])
+                    break
+            if result_file_path:
+                payload = {
+                    "status": "uninstalled",
+                    "config": None,
+                    "was_uninstalled": True,
+                }
+                result_file_path.write_text(json.dumps(payload), encoding="utf-8")
+            res_mock = MagicMock()
+            res_mock.returncode = 0
+            return res_mock
+
+        with patch("subprocess.run", side_effect=fake_subprocess_uninstall):
+            cfg = run_setup_gui_in_subprocess(
+                env=self.env,
+                config_path=self.tmp_path / "sync_cfg.json",
+            )
+
+        self.assertIsNotNone(cfg)
+        self.assertTrue(cfg.was_uninstalled)
+
+    def test_run_setup_gui_subprocess_entry_execution(self):
+        """Проверяет точку входа подпроцесса run_setup_gui_subprocess_entry."""
+        from src.client.setup_gui import run_setup_gui_subprocess_entry
+
+        args_file = self.tmp_path / "args.json"
+        result_file = self.tmp_path / "result.json"
+
+        args_data = {
+            "custom_user_data_dir": str(self.tmp_path),
+            "config_path": str(self.tmp_path / "sync.json"),
+            "installer_mode": False,
+        }
+        args_file.write_text(json.dumps(args_data), encoding="utf-8")
+
+        mock_cfg = ClientConfig(device_token="entry_tok_456", player_name="EntryTester")
+
+        with patch("src.client.setup_gui.run_first_time_setup_gui", return_value=mock_cfg):
+            ret = run_setup_gui_subprocess_entry(args_file, result_file)
+
+        self.assertEqual(ret, 0)
+        self.assertTrue(result_file.is_file())
+        saved = json.loads(result_file.read_text(encoding="utf-8"))
+        self.assertEqual(saved["status"], "ok")
+        self.assertEqual(saved["config"]["device_token"], "entry_tok_456")
+
+    def test_factorio_wrapper_internal_setup_gui_cli(self):
+        """Проверяет CLI-флаг --wrapper-internal-setup-gui в factorio_wrapper.py."""
+        from src.client import factorio_wrapper
+
+        args_path = str(self.tmp_path / "args.json")
+        res_path = str(self.tmp_path / "res.json")
+
+        with patch("src.client.setup_gui.run_setup_gui_subprocess_entry", return_value=0) as mock_entry:
+            code = factorio_wrapper.main([
+                "--wrapper-internal-setup-gui",
+                args_path,
+                res_path,
+            ])
+            self.assertEqual(code, 0)
+            mock_entry.assert_called_once_with(Path(args_path), Path(res_path))
+
+    def test_session_orchestrator_passes_use_subprocess_to_gui_runner(self):
+        """Проверяет, что SessionOrchestrator передает use_subprocess=True в gui_runner."""
+        mock_runner = MagicMock(return_value=ClientConfig(device_token="orch_tok_789"))
+        unconfigured_cfg = ClientConfig(device_token="")
+
+        orch = SessionOrchestrator(
+            config=unconfigured_cfg,
+            env=self.env,
+            setup_gui_provider=mock_runner,
+        )
+
+        with patch("src.client.session_orchestrator.show_role_banner"), \
+             patch("src.client.session_orchestrator.copy_to_clipboard"), \
+             patch("src.client.session_orchestrator.HubClient"):
+            orch.prepare_session()
+
+        self.assertTrue(mock_runner.called)
+        _, kwargs = mock_runner.call_args
+        self.assertTrue(kwargs.get("use_subprocess"))
+
 
 

@@ -108,6 +108,13 @@ def parse_wrapper_args(argv: List[str]) -> Tuple[argparse.Namespace, List[str]]:
         action="store_true",
         help="Показать справку перехватчика",
     )
+    parser.add_argument(
+        "--wrapper-internal-setup-gui",
+        nargs=2,
+        metavar=("ARGS_JSON", "RESULT_JSON"),
+        default=None,
+        help="Внутренний сервисный режим: запуск GUI первого запуска в отдельном процессе",
+    )
 
     known_args, game_args = parser.parse_known_args(argv)
     return known_args, game_args
@@ -117,6 +124,15 @@ def main(argv: Optional[List[str]] = None) -> int:
     """Главная точка входа исполняемого перехватчика Factorio."""
     args_list = argv if argv is not None else sys.argv[1:]
     wrapper_args, game_args = parse_wrapper_args(args_list)
+
+    if wrapper_args.wrapper_internal_setup_gui:
+        args_file, result_file = wrapper_args.wrapper_internal_setup_gui
+        try:
+            from src.client.setup_gui import run_setup_gui_subprocess_entry
+            return run_setup_gui_subprocess_entry(Path(args_file), Path(result_file))
+        except Exception as gui_sub_err:
+            logger.exception(f"Ошибка при выполнении внутреннего сервисного GUI: {gui_sub_err}")
+            return 1
 
     if wrapper_args.wrapper_help:
         print("Factorio P2P Cloud Sync & Coordinator Wrapper")

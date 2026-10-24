@@ -373,13 +373,21 @@ class SessionOrchestrator:
 
                 if gui_runner is not None:
                     try:
-                        new_config = gui_runner(
-                            env=self.env,
-                            config_path=self.config_path,
-                            installer_mode=False,
-                            http_client=None,
-                            existing_config=self.config,
-                        )
+                        gui_kwargs: dict[str, Any] = {
+                            "env": self.env,
+                            "config_path": self.config_path,
+                            "installer_mode": False,
+                            "http_client": None,
+                            "existing_config": self.config,
+                        }
+                        try:
+                            import inspect
+                            sig = inspect.signature(gui_runner)
+                            if "use_subprocess" in sig.parameters or any(p.kind == p.VAR_KEYWORD for p in sig.parameters.values()):
+                                gui_kwargs["use_subprocess"] = True
+                        except Exception:
+                            pass
+                        new_config = gui_runner(**gui_kwargs)
                         if new_config and getattr(new_config, "was_uninstalled", False):
                             logger.info("Перехватчик был деинсталлирован пользователем через GUI. Завершение работы.")
                             self.role = RoleType.OFFLINE
@@ -468,13 +476,21 @@ class SessionOrchestrator:
 
                     if gui_runner is not None:
                         try:
-                            new_config = gui_runner(
-                                env=self.env,
-                                config_path=self.config_path,
-                                installer_mode=False,
-                                http_client=None,
-                                prompt_message="Доступ устройства был обновлен администратором. Пожалуйста, введите новый Код Дружбы.",
-                            )
+                            gui_kwargs = {
+                                "env": self.env,
+                                "config_path": self.config_path,
+                                "installer_mode": False,
+                                "http_client": None,
+                                "prompt_message": "Доступ устройства был обновлен администратором. Пожалуйста, введите новый Код Дружбы.",
+                            }
+                            try:
+                                import inspect
+                                sig = inspect.signature(gui_runner)
+                                if "use_subprocess" in sig.parameters or any(p.kind == p.VAR_KEYWORD for p in sig.parameters.values()):
+                                    gui_kwargs["use_subprocess"] = True
+                            except Exception:
+                                pass
+                            new_config = gui_runner(**gui_kwargs)
                             if new_config and getattr(new_config, "was_uninstalled", False):
                                 logger.info("Перехватчик был деинсталлирован пользователем через GUI. Завершение работы.")
                                 self.role = RoleType.OFFLINE

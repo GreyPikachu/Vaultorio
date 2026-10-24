@@ -8,10 +8,14 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import queue
 import shutil
+import subprocess
+import sys
+import tempfile
 import threading
 import time
 import zipfile
@@ -352,6 +356,7 @@ class FirstRunSetupWindow:
         self.root.configure(bg=COLOR_BG)
         self.root.resizable(False, False)
         self.root.bind("<<Wakeup>>", lambda e: None)
+        self.root.protocol("WM_DELETE_WINDOW", self._on_cancel_click)
         self._setup_menus_and_shortcuts()
 
         width = 540
@@ -521,6 +526,8 @@ class FirstRunSetupWindow:
 
     def _poll_ui_queue(self) -> None:
         """Регулярно извлекает задачи из очереди и выполняет их в главном UI-потоке Tkinter."""
+        if getattr(self, "_closing", False):
+            return
         self._drain_ui_queue()
         try:
             self.root.after(40, self._poll_ui_queue)
@@ -1061,11 +1068,40 @@ class FirstRunSetupWindow:
         """Потокобезопасно передает событие прогресса из фонового потока в UI-очередь."""
         self._schedule_ui(lambda u=uploaded, t=total, s=speed: self.update_progress(u, t, s))
 
+    def _close_window_cleanly(self) -> None:
+        """Принудительно скрывает и безопасно уничтожает окно GUI.
+
+        На macOS вызов destroy() без предварительного withdraw() может оставлять
+        окно видимым на экране, если последующий код перехватчика блокирует поток
+        в ожидании процесса игры, вызывая зависание (Not Responding).
+        Скрытие окна через withdraw() и прокачка очереди событий Cocoa гарантируют,
+        что WindowServer уберёт окно до завершения mainloop.
+        """
+        self._closing = True
+        try:
+            self.root.withdraw()
+            self.root.update_idletasks()
+            self.root.update()
+        except Exception:
+            pass
+        try:
+            self.root.quit()
+        except Exception:
+            pass
+        try:
+            self.root.destroy()
+        except Exception:
+            pass
+        try:
+            self.root.update()
+        except Exception:
+            pass
+
     def _on_cancel_click(self) -> None:
         """Закрывает окно без сохранения настроек (автономный запуск)."""
         logger.info("Пользователь закрыл окно первичной настройки (автономный режим).")
         self.result_config = None
-        self.root.destroy()
+        self._close_window_cleanly()
 
     def _on_uninstall_click(self) -> None:
         """Запускает процесс деинсталляции перехватчика."""
@@ -1111,7 +1147,7 @@ class FirstRunSetupWindow:
                 f"{msg}\n\nОригинальная игра Factorio восстановлена в первоначальное состояние. "
                 f"Теперь игра будет запускаться стандартным образом без синхронизатора.",
             )
-            self.root.destroy()
+            self._close_window_cleanly()
         except Exception as e:
             logger.error(f"Ошибка при удалении перехватчика: {e}")
             self.set_status(f"Ошибка удаления: {e}", color=COLOR_ERROR)
@@ -1128,7 +1164,7 @@ class FirstRunSetupWindow:
                 logger.info("Пользователь выбрал не загружать мир на сервер.")
                 self.result_config = self.existing_config
                 self.set_status("Запуск игры...", color=COLOR_SUCCESS)
-                self.root.after(300, self.root.destroy)
+                self.root.after(300, self._close_window_cleanly)
                 return
 
             self.is_activating = True
@@ -1158,7 +1194,7 @@ class FirstRunSetupWindow:
             ):
                 self.result_config = self.existing_config
                 self.set_status("Настройки сохранены. Запуск игры...", color=COLOR_SUCCESS)
-                self.root.after(300, self.root.destroy)
+                self.root.after(300, self._close_window_cleanly)
                 return
 
             self.is_activating = True
@@ -1237,7 +1273,7 @@ class FirstRunSetupWindow:
         if hasattr(self, "progress_speed_lbl"):
             self.progress_speed_lbl.config(text="Завершено! Запуск игры...")
         self.set_status("Мир успешно опубликован на сервер! Запуск игры...", color=COLOR_SUCCESS)
-        self.root.after(800, self.root.destroy)
+        self.root.after(800, self._close_window_cleanly)
 
     def _transition_to_empty_server_world_selection(
         self, cfg: ClientConfig, local_saves: list[Path]
@@ -1362,7 +1398,7 @@ class FirstRunSetupWindow:
         if cfg is not None:
             self.result_config = cfg
         self.set_status("Готово! Сервер подключен. Запуск игры...", color=COLOR_SUCCESS)
-        self.root.after(600, self.root.destroy)
+        self.root.after(600, self._close_window_cleanly)
 
     def _on_activation_error(self, exc: Exception) -> None:
         """Отображает понятную ошибку пользователю."""
@@ -1398,6 +1434,7 @@ def run_first_time_setup_gui(
     on_uninstall_callback: Optional[Callable[[Path], Any]] = None,
     prompt_message: Optional[str] = None,
     existing_config: Optional[ClientConfig] = None,
+    use_subprocess: bool = False,
 ) -> Optional[ClientConfig]:
     """Безопасно запускает графическое окно первичной настройки.
 
@@ -1414,11 +1451,28 @@ def run_first_time_setup_gui(
         on_uninstall_callback: Callback для деинсталляции.
         prompt_message: Текст информационного баннера в окне.
         existing_config: Уже существующая конфигурация (при повторном открытии по Shift).
+        use_subprocess: Если True, окно запускается в отдельном дочернем процессе.
 
     Returns:
         Экземпляр сконфигурированного ClientConfig, либо None если окно закрыто
         пользователем или графический дисплей недоступен.
     """
+    # Если запрошен запуск в изолированном дочернем процессе (macOS window hang prevention)
+    if (
+        use_subprocess
+        and http_client is None
+        and on_install_callback is None
+        and on_uninstall_callback is None
+        and not os.getenv("FACTORIO_HEADLESS_MOCK_INVITE")
+    ):
+        return run_setup_gui_in_subprocess(
+            env=env,
+            config_path=config_path,
+            installer_mode=installer_mode,
+            prompt_message=prompt_message,
+            existing_config=existing_config,
+        )
+
     # Проверка переменной окружения для headless-тестов с мок-активацией
     mock_invite = os.getenv("FACTORIO_HEADLESS_MOCK_INVITE")
     mock_pass = os.getenv("FACTORIO_HEADLESS_MOCK_PASSPHRASE")
@@ -1469,7 +1523,199 @@ def run_first_time_setup_gui(
     except Exception as fatal_gui_err:
         logger.error(f"Критическая ошибка при выполнении GUI первого запуска: {fatal_gui_err}")
         try:
+            root.withdraw()
             root.destroy()
         except Exception:
             pass
         return existing_config if (existing_config and existing_config.is_configured()) else None
+
+
+def run_setup_gui_subprocess_entry(args_file: Path | str, result_file: Path | str) -> int:
+    """Точка входа для выполнения FirstRunSetupWindow в изолированном дочернем процессе.
+
+    Args:
+        args_file: JSON-файл с аргументами запуска.
+        result_file: JSON-файл для записи результата работы.
+
+    Returns:
+        0 при успешном завершении, 1 при ошибке аргументов.
+    """
+    args_p = Path(args_file).resolve()
+    res_p = Path(result_file).resolve()
+
+    res_data: dict[str, Any] = {
+        "status": "cancelled",
+        "config": None,
+        "was_uninstalled": False,
+    }
+
+    try:
+        if not args_p.is_file():
+            logger.error(f"Файл аргументов подпроцесса GUI не найден: {args_p}")
+            res_p.write_text(json.dumps(res_data, ensure_ascii=False, indent=2), encoding="utf-8")
+            return 1
+
+        args_raw = json.loads(args_p.read_text(encoding="utf-8"))
+        custom_game_root = args_raw.get("custom_game_root")
+        custom_user_data_dir = args_raw.get("custom_user_data_dir")
+        config_path = args_raw.get("config_path")
+        installer_mode = bool(args_raw.get("installer_mode", False))
+        prompt_message = args_raw.get("prompt_message")
+        existing_config_dict = args_raw.get("existing_config_dict")
+
+        env = FactorioEnvironment(
+            custom_game_root=Path(custom_game_root) if custom_game_root else None,
+            custom_user_data_dir=Path(custom_user_data_dir) if custom_user_data_dir else None,
+        )
+
+        existing_config: Optional[ClientConfig] = None
+        if existing_config_dict and isinstance(existing_config_dict, dict):
+            try:
+                import dataclasses
+                valid_fields = {f.name for f in dataclasses.fields(ClientConfig)}
+                filtered = {k: v for k, v in existing_config_dict.items() if k in valid_fields}
+                existing_config = ClientConfig(**filtered)
+            except Exception as e:
+                logger.warning(f"Не удалось десериализовать existing_config в подпроцессе: {e}")
+
+        cfg = run_first_time_setup_gui(
+            env=env,
+            config_path=config_path,
+            installer_mode=installer_mode,
+            http_client=None,
+            on_install_callback=None,
+            on_uninstall_callback=None,
+            prompt_message=prompt_message,
+            existing_config=existing_config,
+            use_subprocess=False,
+        )
+
+        if cfg is not None:
+            if getattr(cfg, "was_uninstalled", False):
+                res_data["status"] = "uninstalled"
+                res_data["was_uninstalled"] = True
+                res_data["config"] = cfg.to_dict()
+            else:
+                res_data["status"] = "ok"
+                res_data["config"] = cfg.to_dict()
+        else:
+            res_data["status"] = "cancelled"
+
+    except Exception as exc:
+        logger.exception(f"Критическая ошибка в дочернем процессе GUI: {exc}")
+        res_data["status"] = "error"
+        res_data["error"] = str(exc)
+    finally:
+        try:
+            res_p.write_text(json.dumps(res_data, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception as write_err:
+            logger.error(f"Не удалось записать результат подпроцесса GUI в {res_p}: {write_err}")
+
+    return 0
+
+
+def run_setup_gui_in_subprocess(
+    env: Optional[FactorioEnvironment] = None,
+    config_path: Optional[Path | str] = None,
+    installer_mode: bool = False,
+    prompt_message: Optional[str] = None,
+    existing_config: Optional[ClientConfig] = None,
+) -> Optional[ClientConfig]:
+    """Запускает GUI первого запуска в отдельном изолированном дочернем процессе.
+
+    Это устраняет зависание окна и статус 'Not Responding' на macOS:
+    когда подпроцесс завершается, ядро операционной системы полностью закрывает окно
+    и освобождает связь с WindowServer, а родительский процесс перехватчика
+    остается чистым фоновым демоном без Cocoa/NSApplication.
+    """
+    target_env = env or FactorioEnvironment()
+    target_config_path = str(config_path or target_env.sync_config_path)
+
+    args_data: dict[str, Any] = {
+        "custom_game_root": str(target_env.game_root) if target_env.game_root else None,
+        "custom_user_data_dir": str(target_env.user_data_dir) if target_env.user_data_dir else None,
+        "config_path": target_config_path,
+        "installer_mode": bool(installer_mode),
+        "prompt_message": prompt_message,
+        "existing_config_dict": existing_config.to_dict() if existing_config else None,
+    }
+
+    with tempfile.TemporaryDirectory(prefix="factorio_gui_") as tmp_dir_str:
+        tmp_dir = Path(tmp_dir_str)
+        args_file = tmp_dir / "setup_args.json"
+        result_file = tmp_dir / "setup_result.json"
+
+        args_file.write_text(json.dumps(args_data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        is_frozen = getattr(sys, "frozen", False)
+        if is_frozen:
+            cmd = [
+                sys.executable,
+                "--wrapper-internal-setup-gui",
+                str(args_file),
+                str(result_file),
+            ]
+        else:
+            cmd = [
+                sys.executable,
+                "-m",
+                "src.client.setup_gui",
+                "--subprocess-args",
+                str(args_file),
+                "--subprocess-result",
+                str(result_file),
+            ]
+
+        logger.info(f"Запуск изолированного подпроцесса GUI: {' '.join(cmd)}")
+        try:
+            sub_env = os.environ.copy()
+            res = subprocess.run(cmd, env=sub_env, check=False)
+            logger.info(f"Изолированный подпроцесс GUI завершился с кодом {res.returncode}")
+        except Exception as proc_err:
+            logger.error(f"Не удалось запустить подпроцесс GUI: {proc_err}")
+            return existing_config if (existing_config and existing_config.is_configured()) else None
+
+        if not result_file.is_file():
+            logger.warning(f"Файл результата GUI не найден после завершения подпроцесса: {result_file}")
+            return existing_config if (existing_config and existing_config.is_configured()) else None
+
+        try:
+            result_raw = json.loads(result_file.read_text(encoding="utf-8"))
+            status = result_raw.get("status")
+            cfg_dict = result_raw.get("config")
+            was_uninstalled = bool(result_raw.get("was_uninstalled", False))
+
+            if was_uninstalled or status == "uninstalled":
+                logger.info("Подпроцесс сообщил об успешной деинсталляции перехватчика.")
+                return ClientConfig(was_uninstalled=True)
+
+            if status == "ok" and cfg_dict:
+                import dataclasses
+                valid_fields = {f.name for f in dataclasses.fields(ClientConfig)}
+                filtered = {k: v for k, v in cfg_dict.items() if k in valid_fields}
+                return ClientConfig(**filtered)
+
+            logger.info(f"Подпроцесс GUI завершился со статусом '{status}'.")
+            return None
+        except Exception as parse_err:
+            logger.error(f"Ошибка при чтении результата подпроцесса GUI: {parse_err}")
+            return existing_config if (existing_config and existing_config.is_configured()) else None
+
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Factorio Setup GUI Subprocess")
+    parser.add_argument("--subprocess-args", type=str, default=None)
+    parser.add_argument("--subprocess-result", type=str, default=None)
+    parsed_args, _ = parser.parse_known_args()
+
+    if parsed_args.subprocess_args and parsed_args.subprocess_result:
+        ret_code = run_setup_gui_subprocess_entry(
+            Path(parsed_args.subprocess_args),
+            Path(parsed_args.subprocess_result),
+        )
+        sys.exit(ret_code)
+    else:
+        res = run_first_time_setup_gui(use_subprocess=False)
+        sys.exit(0 if res else 1)
