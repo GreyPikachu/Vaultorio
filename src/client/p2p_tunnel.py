@@ -219,6 +219,7 @@ class ConnectedGuestState:
     is_relay_active: bool = False
     last_seen: float = field(default_factory=time.time)
     last_punch_sent: float = 0.0
+    last_direct_time: float = 0.0
     local_factorio_sock: socket.socket | None = None
 
 
@@ -397,8 +398,9 @@ class HostP2PBridge:
             if not self._s_host:
                 return
             for guest in list(self._guests.values()):
-                # Если прямой канал ещё не установлен и прошло >= 200 мс с прошлой попытки
-                if not guest.is_direct_p2p and (now - guest.last_punch_sent >= 0.2):
+                # Если прямой канал ещё не установлен, продолжаем пробитие (0.2с вначале, 1.0с при активном релее)
+                punch_interval = 0.2 if not guest.is_relay_active else 1.0
+                if not guest.is_direct_p2p and (now - guest.last_punch_sent >= punch_interval):
                     syn_pkt = encode_control_packet({
                         "cmd": "PUNCH_SYN",
                         "sender_role": "host",
@@ -451,7 +453,9 @@ class HostP2PBridge:
                 guest_id = str(ctrl.get("guest_id", ""))
                 with self._lock:
                     if guest_id in self._guests:
-                        self._guests[guest_id].last_seen = time.time()
+                        now_ts = time.time()
+                        self._guests[guest_id].last_seen = now_ts
+                        self._guests[guest_id].last_direct_time = now_ts
 
         # Б. Пакет игровых данных (Direct или Relay)
         elif data.startswith(HEADER_DATA) or data.startswith(HEADER_RELAY):
@@ -512,13 +516,17 @@ class HostP2PBridge:
                 g = self._guests[guest_id]
                 g.active_endpoint = addr
                 g.is_direct_p2p = True
+                g.is_relay_active = False
                 g.last_seen = now
+                g.last_direct_time = now
             else:
                 self._guests[guest_id] = ConnectedGuestState(
                     guest_id=guest_id,
                     active_endpoint=addr,
                     is_direct_p2p=True,
+                    is_relay_active=False,
                     last_seen=now,
+                    last_direct_time=now,
                 )
 
         if self._s_host:
@@ -543,7 +551,9 @@ class HostP2PBridge:
                 g = self._guests[guest_id]
                 g.active_endpoint = addr
                 g.is_direct_p2p = True
+                g.is_relay_active = False
                 g.last_seen = now
+                g.last_direct_time = now
                 logger.info(f"PUNCH_ACK получен от {addr}. Прямой P2P-канал с гостем {guest_id} активен!")
 
     def _get_or_create_guest_socket(self, guest: ConnectedGuestState) -> socket.socket | None:
@@ -575,6 +585,7 @@ class HostP2PBridge:
         addr: Tuple[str, int],
     ) -> None:
         """Пересылает датаграмму от Гостя в локальную Factorio через сокет L_guest_i."""
+        now = time.time()
         with self._lock:
             if guest_id not in self._guests:
                 self._guests[guest_id] = ConnectedGuestState(
@@ -582,17 +593,23 @@ class HostP2PBridge:
                     active_endpoint=addr if not is_relay else None,
                     is_direct_p2p=not is_relay,
                     is_relay_active=is_relay,
+                    last_seen=now,
+                    last_direct_time=now if not is_relay else 0.0,
                 )
             guest = self._guests[guest_id]
-            guest.last_seen = time.time()
+            guest.last_seen = now
             if is_relay:
-                guest.is_relay_active = True
-                guest.is_direct_p2p = False
-                guest.active_endpoint = None
+                # Если прямой P2P уже активен и недавно подтвержден (< 5 сек назад),
+                # НЕ сбрасываем прямой канал из-за остаточного пакета релея из буфера VPS!
+                if not guest.is_direct_p2p or (now - guest.last_direct_time > 5.0):
+                    guest.is_relay_active = True
+                    guest.is_direct_p2p = False
+                    guest.active_endpoint = None
             else:
                 guest.active_endpoint = addr
                 guest.is_direct_p2p = True
                 guest.is_relay_active = False
+                guest.last_direct_time = now
 
             local_sock = self._get_or_create_guest_socket(guest)
 
@@ -691,6 +708,7 @@ class GuestP2PProxy:
         self._last_incoming_packet_time: float = 0.0
         self._last_factorio_packet_time: float = 0.0
         self._last_reconnect_time: float = 0.0
+        self._last_direct_p2p_time: float = 0.0
 
     @property
     def is_running(self) -> bool:
@@ -822,6 +840,7 @@ class GuestP2PProxy:
             self._is_relay_active = True
             self._host_active_endpoint = None
             self._last_incoming_packet_time = 0.0
+            self._last_direct_p2p_time = 0.0
             self._last_reconnect_time = now
             self._punch_start_time = now
             self.local_ip = detect_physical_lan_ip(self.stun_host)
@@ -842,9 +861,9 @@ class GuestP2PProxy:
             else:
                 # Автоматическая детекция смены сети / потери пакетов:
                 # Если Factorio пытается отправлять данные, но от Хоста нет входящих пакетов:
-                # - Если на сокете ещё не получено ни одного входящего пакета, даём 12 сек на рукопожатие, NAT-пробитие (5с) и релей.
-                # - Если связь уже была, но пропала, ждём 8 сек тишины от Хоста.
-                silence_timeout = 8.0 if self._last_incoming_packet_time > 0 else 12.0
+                # - Если на сокете ещё не получено ни одного входящего пакета, даём 25 сек на рукопожатие, NAT-пробитие и релей.
+                # - Если связь уже была, но пропала, ждём 20 сек тишины от Хоста (чтобы автосейв карты 48 МБ не вызывал ложный сброс).
+                silence_timeout = 20.0 if self._last_incoming_packet_time > 0 else 25.0
                 time_since_last_incoming = (
                     now - self._last_incoming_packet_time
                     if self._last_incoming_packet_time > 0
@@ -855,7 +874,7 @@ class GuestP2PProxy:
                     self._last_factorio_packet_time > 0
                     and (now - self._last_factorio_packet_time < 3.0)
                     and (time_since_last_incoming >= silence_timeout)
-                    and (now - self._last_reconnect_time >= 10.0)
+                    and (now - self._last_reconnect_time >= 15.0)
                 ):
                     self._reconnect_external_network(now, reason="no_response_from_host")
 
@@ -870,12 +889,13 @@ class GuestP2PProxy:
                             "Прямое пробитие NAT не ответило вовремя. Переключаемся на резервный STUN-релей через VPS."
                         )
 
-                    # Шлём пробивочные пакеты каждые 200 мс
-                    if now - self._last_punch_sent >= 0.2:
+                    # Шлём пробивочные пакеты: 0.2с до подключения релея, 1.0с во время релея для бесшовного возврата в P2P
+                    punch_interval = 0.2 if not self.is_relay_active else 1.0
+                    if now - self._last_punch_sent >= punch_interval:
                         self._send_punch_syn(now)
                 else:
-                    # Прямой канал установлен: посылаем keepalive каждые 10 сек
-                    if now - self._last_keepalive >= 10.0:
+                    # Прямой канал установлен: посылаем keepalive каждые 3 сек для удержания NAT-трансляции
+                    if now - self._last_keepalive >= 3.0:
                         self._send_keepalive()
 
             with self._lock:
@@ -997,18 +1017,24 @@ class GuestP2PProxy:
             if not parsed:
                 return
             guest_id, raw_payload, is_relay = parsed
+            now = time.time()
 
             # Обновляем состояние канала
             with self._lock:
                 self._is_connected = True
+                self._last_incoming_packet_time = now
                 if is_relay:
-                    self._is_relay_active = True
-                    self._is_direct_p2p = False
-                    self._host_active_endpoint = None
+                    # Если прямой P2P уже активен и недавно подтвержден (< 5 сек назад),
+                    # НЕ сбрасываем прямой канал из-за остаточного пакета релея из буфера VPS!
+                    if not self._is_direct_p2p or (now - self._last_direct_p2p_time > 5.0):
+                        self._is_relay_active = True
+                        self._is_direct_p2p = False
+                        self._host_active_endpoint = None
                 else:
                     self._is_direct_p2p = True
                     self._is_relay_active = False
                     self._host_active_endpoint = addr
+                    self._last_direct_p2p_time = now
 
             # Пересылаем чистую датаграмму локальному клиенту Factorio
             if self._l_proxy and self._factorio_client_addr:
@@ -1036,18 +1062,21 @@ class GuestP2PProxy:
 
     def _handle_punch_syn(self, payload: Dict[str, Any], addr: Tuple[str, int]) -> None:
         """Отвечает PUNCH_ACK на встречный пробивочный пакет от Хоста."""
+        now = time.time()
         with self._lock:
             self._host_active_endpoint = addr
             self._is_connected = True
             self._is_direct_p2p = True
             self._is_relay_active = False
+            self._last_direct_p2p_time = now
+            self._last_incoming_packet_time = now
 
         if self._s_guest:
             ack_pkt = encode_control_packet({
                 "cmd": "PUNCH_ACK",
                 "sender_role": "guest",
                 "guest_id": self.guest_id,
-                "ts": payload.get("ts", time.time()),
+                "ts": payload.get("ts", now),
             })
             try:
                 self._s_guest.sendto(ack_pkt, addr)
@@ -1057,7 +1086,8 @@ class GuestP2PProxy:
     def _handle_punch_ack(self, payload: Dict[str, Any], addr: Tuple[str, int]) -> None:
         """Подтверждает установление прямого P2P-канала при получении PUNCH_ACK от Хоста."""
         syn_ts = payload.get("ts", 0)
-        rtt = round((time.time() - syn_ts) * 1000.0, 2) if syn_ts else None
+        now = time.time()
+        rtt = round((now - syn_ts) * 1000.0, 2) if syn_ts else None
 
         with self._lock:
             self._host_active_endpoint = addr
@@ -1065,5 +1095,7 @@ class GuestP2PProxy:
             self._is_direct_p2p = True
             self._is_relay_active = False
             self._rtt_ms = rtt
+            self._last_direct_p2p_time = now
+            self._last_incoming_packet_time = now
 
         logger.info(f"Прямой P2P-туннель с Хостом установлен! Адрес: {addr}, Пинг: {rtt} мс")

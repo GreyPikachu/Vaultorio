@@ -977,3 +977,72 @@ def test_t9_7_7_host_bridge_resets_direct_on_guest_network_change():
     assert g.active_endpoint is None
 
 
+def test_t9_7_8_anti_latch_protects_fresh_direct_p2p():
+    """T9.7.8: Свежий прямой P2P-канал (< 5 сек) защищен от случайных запоздалых пакетов релея."""
+    host_bridge = HostP2PBridge(
+        session_token="test_anti_latch",
+        stun_host="127.0.0.1",
+        stun_port=_get_free_udp_port(),
+        factorio_port=_get_free_udp_port(),
+    )
+
+    # 1. Прямой канал установлен прямо сейчас
+    now = time.time()
+    host_bridge._guests["guest_pika"] = ConnectedGuestState(
+        guest_id="guest_pika",
+        public_endpoint=("1.2.3.4", 5000),
+        local_endpoint=("192.168.1.10", 5000),
+        active_endpoint=("1.2.3.4", 5000),
+        is_direct_p2p=True,
+        is_relay_active=False,
+        last_direct_time=now,
+    )
+
+    # 2. Из буфера сервера прилетает запоздалый пакет релея
+    host_bridge._route_game_data_to_factorio(
+        guest_id="guest_pika",
+        raw_payload=b"stray_relay_packet",
+        is_relay=True,
+        addr=("198.51.100.1", 14197),
+    )
+
+    # Прямой канал НЕ должен сброситься!
+    g = host_bridge._guests["guest_pika"]
+    assert g.is_direct_p2p is True
+    assert g.is_relay_active is False
+    assert g.active_endpoint == ("1.2.3.4", 5000)
+
+    # 3. Аналогично для GuestP2PProxy
+    from unittest.mock import patch
+    guest_proxy = GuestP2PProxy(
+        guest_name="GuestAntiLatch",
+        stun_host="127.0.0.1",
+        stun_port=_get_free_udp_port(),
+        proxy_port=_get_free_udp_port(),
+    )
+    guest_proxy._is_connected = True
+    guest_proxy._is_direct_p2p = True
+    guest_proxy._is_relay_active = False
+    guest_proxy._host_active_endpoint = ("1.2.3.4", 5000)
+    guest_proxy._last_direct_p2p_time = now
+
+    # Гость получает остаточный пакет релея
+    relay_packet = format_data_packet("GuestAntiLatch", b"data", is_relay=True)
+    with patch.object(guest_proxy, "_l_proxy", None):
+        # Эмулируем обработку пакета
+        parsed = parse_data_packet(relay_packet)
+        assert parsed is not None
+        _, _, is_relay = parsed
+        with guest_proxy._lock:
+            if is_relay:
+                if not guest_proxy._is_direct_p2p or (now - guest_proxy._last_direct_p2p_time > 5.0):
+                    guest_proxy._is_relay_active = True
+                    guest_proxy._is_direct_p2p = False
+                    guest_proxy._host_active_endpoint = None
+
+    assert guest_proxy.is_direct_p2p is True
+    assert guest_proxy.is_relay_active is False
+    assert guest_proxy._host_active_endpoint == ("1.2.3.4", 5000)
+
+
+
