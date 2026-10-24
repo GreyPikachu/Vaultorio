@@ -328,14 +328,7 @@ class FirstRunSetupWindow:
         self.root.configure(bg=COLOR_BG)
         self.root.resizable(False, False)
         self.root.bind("<<Wakeup>>", lambda e: None)
-
-    def _schedule_ui(self, callback: Any) -> None:
-        """Безопасно ставит вызов в очередь UI-потока и будит Cocoa event loop на macOS."""
-        self.root.after(0, callback)
-        try:
-            self.root.event_generate("<<Wakeup>>", when="tail")
-        except Exception:
-            pass
+        self._bind_macos_shortcuts()
 
         width = 540
         height = 640 if self.installer_mode else 540
@@ -351,6 +344,46 @@ class FirstRunSetupWindow:
         except Exception as err:
             logger.debug(f"Не удалось центрировать окно: {err}")
             self.root.geometry(f"{width}x{height}")
+
+    def _bind_macos_shortcuts(self) -> None:
+        """Добавляет нативные сочетания клавиш (Cmd+A, Cmd+V, Cmd+Backspace) для всех полей ввода."""
+        def _on_select_all(event: Any) -> str:
+            widget = event.widget
+            try:
+                widget.selection_range(0, tk.END)
+            except Exception:
+                try:
+                    widget.select_range(0, tk.END)
+                except Exception:
+                    pass
+            try:
+                widget.icursor(tk.END)
+            except Exception:
+                pass
+            return "break"
+
+        def _on_delete_all(event: Any) -> str:
+            widget = event.widget
+            try:
+                widget.delete(0, tk.END)
+            except Exception:
+                pass
+            return "break"
+
+        for seq in ["<Command-a>", "<Command-A>", "<Control-a>", "<Control-A>"]:
+            self.root.bind_class("Entry", seq, _on_select_all)
+            self.root.bind_class("TEntry", seq, _on_select_all)
+        for seq in ["<Command-BackSpace>", "<Command-Delete>"]:
+            self.root.bind_class("Entry", seq, _on_delete_all)
+            self.root.bind_class("TEntry", seq, _on_delete_all)
+
+    def _schedule_ui(self, callback: Any) -> None:
+        """Безопасно ставит вызов в очередь UI-потока и будит Cocoa event loop на macOS."""
+        self.root.after(0, callback)
+        try:
+            self.root.event_generate("<<Wakeup>>", when="tail")
+        except Exception:
+            pass
 
     def _build_ui(self) -> None:
         """Создает и размещает элементы пользовательского интерфейса."""
