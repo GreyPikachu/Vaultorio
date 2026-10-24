@@ -475,3 +475,86 @@ def test_t10_6_5_run_full_cycle_try_finally(test_env: FactorioEnvironment, tmp_p
         code = orchestrator.run(game_args=["--arg1", "val1"])
         assert code == 0
         spy_teardown.assert_called_once()
+
+
+def test_t10_6_6_run_offline_execv_posix(test_env: FactorioEnvironment, tmp_path: Path):
+    """T10.6.6: В автономном режиме (OFFLINE) на POSIX вызывается os.execv без блокировки."""
+    dummy_bin = tmp_path / "factorio_core"
+    dummy_bin.write_text("#!/bin/sh\nexit 0\n")
+    dummy_bin.chmod(0o755)
+
+    mock_exec = MagicMock()
+    orchestrator = SessionOrchestrator(
+        env=test_env,
+        custom_core_bin=dummy_bin,
+        exec_fn=mock_exec,
+    )
+    orchestrator.role = RoleType.OFFLINE
+    orchestrator.is_prepared = True
+
+    with patch.object(orchestrator, "prepare_session", return_value={"role": RoleType.OFFLINE}), \
+         patch.object(orchestrator, "launch_game") as mock_launch, \
+         patch.object(orchestrator, "wait_game") as mock_wait, \
+         patch("platform.system", return_value="Darwin"):
+
+        code = orchestrator.run(game_args=["--offline-arg"])
+        assert code == 0
+        mock_exec.assert_called_once_with(str(dummy_bin), [str(dummy_bin), "--offline-arg"])
+        mock_launch.assert_not_called()
+        mock_wait.assert_not_called()
+
+
+def test_t10_6_7_run_offline_windows_popen(test_env: FactorioEnvironment, tmp_path: Path):
+    """T10.6.7: В автономном режиме (OFFLINE) на Windows вызывается subprocess.Popen без ожидания."""
+    dummy_bin = tmp_path / "factorio_core.exe"
+    dummy_bin.write_text("binary")
+
+    orchestrator = SessionOrchestrator(
+        env=test_env,
+        custom_core_bin=dummy_bin,
+    )
+    orchestrator.role = RoleType.OFFLINE
+    orchestrator.is_prepared = True
+
+    with patch.object(orchestrator, "prepare_session", return_value={"role": RoleType.OFFLINE}), \
+         patch.object(orchestrator, "wait_game") as mock_wait, \
+         patch("subprocess.Popen") as mock_popen, \
+         patch("platform.system", return_value="Windows"):
+
+        code = orchestrator.run(game_args=["--win-arg"])
+        assert code == 0
+        mock_popen.assert_called_once_with([str(dummy_bin), "--win-arg"])
+        mock_wait.assert_not_called()
+
+
+def test_t10_6_8_run_offline_execv_fallback_on_error(test_env: FactorioEnvironment, tmp_path: Path):
+    """T10.6.8: При сбое os.execv происходит безопасный fallback на launch_game."""
+    dummy_bin = tmp_path / "factorio_core"
+    dummy_bin.write_text("#!/bin/sh\nexit 0\n")
+    dummy_bin.chmod(0o755)
+
+    mock_exec = MagicMock(side_effect=OSError("Exec failed"))
+    orchestrator = SessionOrchestrator(
+        env=test_env,
+        custom_core_bin=dummy_bin,
+        exec_fn=mock_exec,
+    )
+    orchestrator.role = RoleType.OFFLINE
+    orchestrator.is_prepared = True
+
+    mock_proc = MagicMock(spec=subprocess.Popen)
+    mock_proc.pid = 9999
+    mock_proc.poll.return_value = 0
+    mock_proc.returncode = 0
+
+    with patch.object(orchestrator, "prepare_session", return_value={"role": RoleType.OFFLINE}), \
+         patch.object(orchestrator, "launch_game", return_value=mock_proc) as mock_launch, \
+         patch.object(orchestrator, "wait_game", return_value=0) as mock_wait, \
+         patch("platform.system", return_value="Darwin"):
+
+        code = orchestrator.run(game_args=["--fallback"])
+        assert code == 0
+        mock_exec.assert_called_once()
+        mock_launch.assert_called_once_with(executable_path=None, game_args=["--fallback"])
+        mock_wait.assert_called_once_with(mock_proc)
+

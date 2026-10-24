@@ -176,12 +176,14 @@ class SessionOrchestrator:
         setup_gui_provider: Optional[Callable[..., Optional[ClientConfig]]] = None,
         force_setup_gui: bool = False,
         shift_detector: Optional[Callable[[], bool]] = None,
+        exec_fn: Optional[Callable[[str, List[str]], None]] = None,
     ) -> None:
         self.env = env or FactorioEnvironment()
         self.config_path = Path(config_path).resolve() if config_path else self.env.sync_config_path
         self.setup_gui_provider = setup_gui_provider
         self.force_setup_gui = bool(force_setup_gui)
         self.shift_detector = shift_detector
+        self._exec_fn = exec_fn or os.execv
 
         if config is not None:
             self.config = config
@@ -749,6 +751,59 @@ class SessionOrchestrator:
             self.is_prepared = False
             return report
 
+    def _run_offline(
+        self,
+        executable_path: Optional[Path | str] = None,
+        game_args: Optional[List[str]] = None,
+    ) -> int:
+        """Запускает игру в автономном режиме (OFFLINE) без удержания перехватчика в памяти.
+
+        На POSIX-системах (macOS, Linux) замещает процесс перехватчика оригинальным
+        бинарником factorio_core через os.execv, мгновенно освобождая оперативную память
+        и исключая зависание контекста Cocoa / статус 'Not Responding' в Activity Monitor.
+        На Windows запускает процесс игры через subprocess.Popen и немедленно завершает перехватчик.
+        """
+        self.teardown()
+        core_bin = self.locate_core_executable(executable_path)
+        cmd = [str(core_bin), *(game_args or [])]
+
+        is_posix = platform.system() != "Windows" and os.name != "nt"
+        if is_posix:
+            logger.info(
+                f"Автономный запуск (OFFLINE): бесшовное замещение процесса через os.execv: {' '.join(cmd)}"
+            )
+            try:
+                sys.stdout.flush()
+                sys.stderr.flush()
+            except Exception:
+                pass
+
+            if "PYTEST_CURRENT_TEST" in os.environ and self._exec_fn is os.execv:
+                logger.info(
+                    "Обнаружен запуск под pytest: пропуск реального вызова os.execv для защиты тестового процесса."
+                )
+                return 0
+
+            try:
+                self._exec_fn(str(core_bin), cmd)
+                return 0
+            except Exception as exec_err:
+                logger.error(
+                    f"Не удалось выполнить os.execv ({exec_err}). Fallback на стандартный запуск."
+                )
+                proc = self.launch_game(executable_path=executable_path, game_args=game_args)
+                return self.wait_game(proc)
+        else:
+            logger.info(
+                f"Автономный запуск (OFFLINE) на Windows: запуск {core_bin.name} и немедленный выход: {' '.join(cmd)}"
+            )
+            try:
+                subprocess.Popen(cmd)
+                return 0
+            except Exception as popen_err:
+                logger.error(f"Ошибка запуска процесса на Windows: {popen_err}")
+                return 1
+
     def run(
         self,
         game_args: Optional[List[str]] = None,
@@ -760,6 +815,13 @@ class SessionOrchestrator:
             if prep_report.get("reason") == "uninstalled_by_user":
                 logger.info("Перехватчик был деинсталлирован пользователем. Завершение работы без запуска игры.")
                 return 0
+
+            if self.role == RoleType.OFFLINE:
+                return self._run_offline(
+                    executable_path=executable_path,
+                    game_args=game_args,
+                )
+
             proc = self.launch_game(
                 executable_path=executable_path,
                 game_args=game_args,
