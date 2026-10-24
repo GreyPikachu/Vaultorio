@@ -164,7 +164,10 @@ Write-Host ""
 
 # 7. Внедрение перехватчика в игру
 Write-Host "[5/5] Внедрение перехватчика в Factorio..." -ForegroundColor White
+Push-Location $installDir
+$env:PYTHONPATH = "$installDir"
 & $venvPython -m src.installer.installer --install --game-dir "$foundGame" --wrapper-bin "$wrapperBin" --hub-url "http://45.91.248.78:8088"
+Pop-Location
 
 Write-Host ""
 Write-Host "============================================================" -ForegroundColor Green
