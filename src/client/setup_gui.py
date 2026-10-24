@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import os
+import queue
 import shutil
 import threading
 import time
@@ -220,6 +221,9 @@ class FirstRunSetupWindow:
         # Определение папки игры
         self.game_path: Optional[Path] = self.env.game_root
         self.was_uninstalled: bool = False
+
+        self._ui_queue: queue.Queue[Callable[[], None]] = queue.Queue()
+        self._poll_ui_queue()
 
         self._configure_dark_theme()
         self._init_window()
@@ -483,13 +487,31 @@ class FirstRunSetupWindow:
 
         self._on_entry_key = _handle_entry_keypress
 
-    def _schedule_ui(self, callback: Any) -> None:
-        """Безопасно ставит вызов в очередь UI-потока и будит Cocoa event loop на macOS."""
-        self.root.after(0, callback)
+    def _drain_ui_queue(self) -> None:
+        """Выполняет все накопленные задачи из очереди в UI-потоке."""
         try:
-            self.root.event_generate("<<Wakeup>>", when="tail")
+            while True:
+                task = self._ui_queue.get_nowait()
+                try:
+                    task()
+                except Exception as err:
+                    logger.error(f"Ошибка выполнения UI-задачи из очереди: {err}")
+        except queue.Empty:
+            pass
+
+    def _poll_ui_queue(self) -> None:
+        """Регулярно извлекает задачи из очереди и выполняет их в главном UI-потоке Tkinter."""
+        self._drain_ui_queue()
+        try:
+            self.root.after(40, self._poll_ui_queue)
         except Exception:
             pass
+
+    def _schedule_ui(self, callback: Any) -> None:
+        """Потокобезопасно отправляет задачу в UI-очередь главного потока."""
+        self._ui_queue.put(callback)
+        if threading.current_thread() is threading.main_thread():
+            self._drain_ui_queue()
 
     def _build_ui(self) -> None:
         """Создает и размещает элементы пользовательского интерфейса."""
@@ -692,7 +714,15 @@ class FirstRunSetupWindow:
         code_row = tk.Frame(self.inputs_card, bg=COLOR_CARD)
         code_row.pack(fill=tk.X, pady=(4, 10))
 
-        self.code_var = tk.StringVar()
+        initial_code = ""
+        try:
+            cb_text = self.root.clipboard_get().strip()
+            if cb_text.startswith("FCT1-") and len(cb_text) > 40:
+                initial_code = cb_text
+        except Exception:
+            pass
+
+        self.code_var = tk.StringVar(value=initial_code)
         self.code_entry = tk.Entry(
             code_row,
             textvariable=self.code_var,
@@ -823,9 +853,13 @@ class FirstRunSetupWindow:
             )
             self.uninstall_btn.pack(fill=tk.X)
 
-        # Устанавливаем фокус ввода на поле ввода при открытии
+        # Устанавливаем фокус ввода при открытии окна
         try:
-            self.code_entry.focus_set()
+            if initial_code:
+                self.pass_entry.focus_set()
+                self.set_status("Код Дружбы обнаружен в буфере обмена и подставлен", color=COLOR_INFO)
+            else:
+                self.code_entry.focus_set()
         except Exception:
             pass
 
@@ -1092,12 +1126,30 @@ class FirstRunSetupWindow:
     ) -> None:
         """Выполняет сетевой запрос активации в фоновом потоке."""
         try:
+            # Проверяем http_client: если его base_url не совпадает с адресом сервера из инвайта,
+            # используем прямое подключение к серверу инвайта (None)
+            target_http_client = self.http_client
+            if target_http_client is not None:
+                try:
+                    from src.common.invite_codec import decode_invite_code
+                    dec_preview = decode_invite_code(code, passphrase)
+                    inv_url = str(dec_preview.get("hub_http_url", "")).rstrip("/")
+                    client_base = str(getattr(target_http_client, "base_url", "")).rstrip("/")
+                    if client_base and inv_url and client_base != inv_url:
+                        logger.info(
+                            f"Базовый адрес клиента ({client_base}) не совпадает с адресом инвайта ({inv_url}). "
+                            f"Переключение на прямое подключение."
+                        )
+                        target_http_client = None
+                except Exception:
+                    pass
+
             cfg = HubClient.activate_with_invite_code(
                 invite_code=code,
                 passphrase=passphrase,
                 player_name=self.player_name,
                 config_path=self.config_path,
-                http_client=self.http_client,
+                http_client=target_http_client,
             )
 
             # Если передан callback установщика

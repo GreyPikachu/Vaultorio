@@ -377,7 +377,7 @@ class SessionOrchestrator:
                             env=self.env,
                             config_path=self.config_path,
                             installer_mode=False,
-                            http_client=getattr(self.hub_client, "_client", None),
+                            http_client=None,
                             existing_config=self.config,
                         )
                         if new_config and getattr(new_config, "was_uninstalled", False):
@@ -472,7 +472,7 @@ class SessionOrchestrator:
                                 env=self.env,
                                 config_path=self.config_path,
                                 installer_mode=False,
-                                http_client=getattr(self.hub_client, "_client", None),
+                                http_client=None,
                                 prompt_message="Доступ устройства был обновлен администратором. Пожалуйста, введите новый Код Дружбы.",
                             )
                             if new_config and getattr(new_config, "was_uninstalled", False):
