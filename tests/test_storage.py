@@ -37,9 +37,13 @@ class TestSaveStorageManager(unittest.TestCase):
         """Helper to create a syntactically valid Factorio save archive."""
         file_path.parent.mkdir(parents=True, exist_ok=True)
         with zipfile.ZipFile(file_path, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
-            zf.writestr("my_save/level.dat", f"Binary Level Data: {marker}".encode("utf-8") * 5)
-            zf.writestr("my_save/info.json", json.dumps({"name": marker, "version": "2.0"}))
-            zf.writestr("my_save/control.lua", "-- Lua script logic\n")
+            for arcname, data in [
+                ("my_save/level.dat", f"Binary Level Data: {marker}".encode("utf-8") * 5),
+                ("my_save/info.json", json.dumps({"name": marker, "version": "2.0"}).encode("utf-8")),
+                ("my_save/control.lua", b"-- Lua script logic\n"),
+            ]:
+                zi = zipfile.ZipInfo(arcname, date_time=(2026, 1, 1, 0, 0, 0))
+                zf.writestr(zi, data)
         return file_path
 
     def _create_corrupted_crc_zip(self, file_path: Path) -> Path:

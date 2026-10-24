@@ -25,8 +25,12 @@ if [ -n "$FOUND_GAME" ]; then
     GAME_BIN="$FOUND_GAME/Contents/MacOS/factorio"
     if [ -f "$CORE_BIN" ]; then
         echo "Восстановление оригинального бинарника игры..."
+        rm -f "$GAME_BIN"
         mv -f "$CORE_BIN" "$GAME_BIN"
         chmod +x "$GAME_BIN"
+        if command -v codesign >/dev/null 2>&1; then
+            codesign -s - --force "$GAME_BIN" >/dev/null 2>&1 || true
+        fi
     fi
     rm -f "$FOUND_GAME/factorio_sync_config.json"
     rm -f "$HOME/Library/Application Support/factorio/factorio_sync_config.json"

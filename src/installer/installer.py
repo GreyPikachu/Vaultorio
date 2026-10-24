@@ -310,6 +310,10 @@ class FactorioWrapperInstaller:
                 shutil.copy2(src_wrapper, game_bin)
                 os.chmod(game_bin, 0o755)
                 logger.info(f"Файл перехватчика {game_bin.name} успешно обновлен.")
+            else:
+                self._create_fallback_wrapper(game_bin, core_bin)
+                os.chmod(game_bin, 0o755)
+                logger.info(f"Файл перехватчика {game_bin.name} успешно восстановлен/обновлен (fallback-режим).")
 
         # СЛУЧАЙ Б: Первичная установка (factorio_core еще нет)
         else:
@@ -414,6 +418,7 @@ class FactorioWrapperInstaller:
                 f'exec "{python_bin}" -m src.client.factorio_wrapper --wrapper-core-bin "{core_bin}" "$@"\n',
                 encoding="utf-8",
             )
+            os.chmod(target_bin, 0o755)
             # На macOS подписываем ad-hoc ядро factorio_core, чтобы AMFI / Hardened Runtime разрешали запуск
             if sys.platform == "darwin" and shutil.which("codesign"):
                 try:

@@ -229,6 +229,43 @@ def test_t11_3_1_repeat_install_does_not_corrupt_core(win_game_dir: Path, dummy_
     assert paths["game_binary"].read_bytes() == b"NEW_WRAPPER_V2_PAYLOAD"
 
 
+def test_t11_3_2_repeat_install_fallback_wrapper_recreates_missing_game_binary(macos_game_dir: Path):
+    """T11.3.2: Повторная установка при отсутствии скомпилированного бинарника (fallback)
+    успешно восстанавливает game_binary, если он был удален или отсутствует."""
+    installer = FactorioWrapperInstaller()
+    paths = installer.get_binary_paths(macos_game_dir, system_override="Darwin")
+
+    original_engine_bytes = paths["game_binary"].read_bytes()
+
+    # Первая установка без wrapper_binary_path (создается fallback wrapper)
+    installer.install(
+        game_dir=macos_game_dir,
+        player_name="FallbackUser",
+        wrapper_binary_path=None,
+        system_override="Darwin",
+    )
+    assert paths["core_binary"].read_bytes() == original_engine_bytes
+    assert paths["game_binary"].is_file()
+
+    # Имитируем случай, когда пользователь удалил файл перехватчика вручную
+    paths["game_binary"].unlink()
+    assert not paths["game_binary"].exists()
+    assert paths["core_binary"].is_file()
+
+    # Повторная установка (как при curl install.sh | bash)
+    report = installer.install(
+        game_dir=macos_game_dir,
+        player_name="FallbackUser",
+        wrapper_binary_path=None,
+        system_override="Darwin",
+    )
+    assert report["is_update"] is True
+    assert paths["core_binary"].read_bytes() == original_engine_bytes
+    # Проверяем, что game_binary был восстановлен и имеет права исполнения!
+    assert paths["game_binary"].is_file()
+    assert bool(paths["game_binary"].stat().st_mode & stat.S_IXUSR)
+
+
 # ============================================================================
 # T11.4: Деинсталляция и полный откат к оригинальной игре
 # ============================================================================
