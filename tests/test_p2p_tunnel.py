@@ -24,6 +24,7 @@ from src.client.p2p_tunnel import (
     HEADER_CONTROL,
     HEADER_DATA,
     HEADER_RELAY,
+    ConnectedGuestState,
     GuestP2PProxy,
     HostP2PBridge,
     decode_control_packet,
@@ -923,5 +924,56 @@ def test_t9_7_6_guest_proxy_auto_reconnect_on_network_change():
         assert guest_proxy._peer_match_received is False
 
         guest_proxy.stop()
+
+
+def test_t9_7_7_host_bridge_resets_direct_on_guest_network_change():
+    """T9.7.7: Хост сбрасывает direct_p2p при смене координат Гостя или при получении relay-пакета."""
+    host_bridge = HostP2PBridge(
+        session_token="test_token_123",
+        stun_host="127.0.0.1",
+        stun_port=_get_free_udp_port(),
+        factorio_port=_get_free_udp_port(),
+    )
+
+    # 1. Гость подключен напрямую по старому IP
+    host_bridge._guests["guest_1"] = ConnectedGuestState(
+        guest_id="guest_1",
+        public_endpoint=("1.2.3.4", 5000),
+        local_endpoint=("192.168.1.10", 5000),
+        active_endpoint=("1.2.3.4", 5000),
+        is_direct_p2p=True,
+        is_relay_active=False,
+    )
+
+    # 2. Приходит PEER_MATCH с новым IP гостя (смена Wi-Fi)
+    host_bridge._handle_peer_match({
+        "guest_id": "guest_1",
+        "guest_name": "TestGuest",
+        "guest_public": ["5.6.7.8", 6000],
+        "guest_local": ["10.0.0.5", 6000],
+    })
+
+    g = host_bridge._guests["guest_1"]
+    assert g.public_endpoint == ("5.6.7.8", 6000)
+    assert g.active_endpoint is None
+    assert g.is_direct_p2p is False
+    assert g.is_relay_active is True
+
+    # 3. Имитируем, что гость временно установил direct P2P
+    g.active_endpoint = ("5.6.7.8", 6000)
+    g.is_direct_p2p = True
+    g.is_relay_active = False
+
+    # 4. Гость отправляет пакет через relay -> хост должен переключиться на relay
+    host_bridge._route_game_data_to_factorio(
+        guest_id="guest_1",
+        raw_payload=b"\x00\x01\x02",
+        is_relay=True,
+        addr=("198.51.100.1", 14197),
+    )
+
+    assert g.is_relay_active is True
+    assert g.is_direct_p2p is False
+    assert g.active_endpoint is None
 
 

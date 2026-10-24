@@ -481,9 +481,21 @@ class HostP2PBridge:
                     guest_name=guest_name,
                     public_endpoint=pub_ep,
                     local_endpoint=loc_ep,
+                    is_relay_active=True,
                 )
             else:
                 g = self._guests[guest_id]
+                # При смене координат или повторном матчинге сбрасываем старый прямой канал
+                if g.public_endpoint != pub_ep or g.local_endpoint != loc_ep or not g.is_direct_p2p:
+                    logger.info(
+                        f"PEER_MATCH: обновление координат гостя '{guest_name}' ({guest_id}): "
+                        f"pub={pub_ep}, loc={loc_ep}. Сброс прямого канала для повторного рукопожатия."
+                    )
+                    g.active_endpoint = None
+                    g.is_direct_p2p = False
+                    g.is_relay_active = True
+                    g.last_punch_sent = 0.0
+
                 g.public_endpoint = pub_ep
                 g.local_endpoint = loc_ep
                 g.guest_name = guest_name
@@ -575,9 +587,12 @@ class HostP2PBridge:
             guest.last_seen = time.time()
             if is_relay:
                 guest.is_relay_active = True
+                guest.is_direct_p2p = False
+                guest.active_endpoint = None
             else:
                 guest.active_endpoint = addr
                 guest.is_direct_p2p = True
+                guest.is_relay_active = False
 
             local_sock = self._get_or_create_guest_socket(guest)
 
@@ -808,6 +823,7 @@ class GuestP2PProxy:
             self._host_active_endpoint = None
             self._last_incoming_packet_time = 0.0
             self._last_reconnect_time = now
+            self._punch_start_time = now
             self.local_ip = detect_physical_lan_ip(self.stun_host)
 
         self._send_guest_hello()
@@ -825,12 +841,21 @@ class GuestP2PProxy:
                     self._send_guest_hello()
             else:
                 # Автоматическая детекция смены сети / потери пакетов:
-                # Если Factorio пытается отправлять данные, но от Хоста нет входящих пакетов > 3.5 сек
+                # Если Factorio пытается отправлять данные, но от Хоста нет входящих пакетов:
+                # - Если на сокете ещё не получено ни одного входящего пакета, даём 12 сек на рукопожатие, NAT-пробитие (5с) и релей.
+                # - Если связь уже была, но пропала, ждём 8 сек тишины от Хоста.
+                silence_timeout = 8.0 if self._last_incoming_packet_time > 0 else 12.0
+                time_since_last_incoming = (
+                    now - self._last_incoming_packet_time
+                    if self._last_incoming_packet_time > 0
+                    else now - self._last_reconnect_time
+                )
+
                 if (
                     self._last_factorio_packet_time > 0
                     and (now - self._last_factorio_packet_time < 3.0)
-                    and (now - self._last_incoming_packet_time > 3.5)
-                    and (now - self._last_reconnect_time >= 4.0)
+                    and (time_since_last_incoming >= silence_timeout)
+                    and (now - self._last_reconnect_time >= 10.0)
                 ):
                     self._reconnect_external_network(now, reason="no_response_from_host")
 
@@ -978,6 +1003,8 @@ class GuestP2PProxy:
                 self._is_connected = True
                 if is_relay:
                     self._is_relay_active = True
+                    self._is_direct_p2p = False
+                    self._host_active_endpoint = None
                 else:
                     self._is_direct_p2p = True
                     self._is_relay_active = False
