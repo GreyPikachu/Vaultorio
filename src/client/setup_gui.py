@@ -327,6 +327,15 @@ class FirstRunSetupWindow:
         self.root.title("Factorio Co-op - Подключение к облачному миру")
         self.root.configure(bg=COLOR_BG)
         self.root.resizable(False, False)
+        self.root.bind("<<Wakeup>>", lambda e: None)
+
+    def _schedule_ui(self, callback: Any) -> None:
+        """Безопасно ставит вызов в очередь UI-потока и будит Cocoa event loop на macOS."""
+        self.root.after(0, callback)
+        try:
+            self.root.event_generate("<<Wakeup>>", when="tail")
+        except Exception:
+            pass
 
         width = 540
         height = 640 if self.installer_mode else 540
@@ -875,10 +884,10 @@ class FirstRunSetupWindow:
                 player_name=self.player_name,
             )
             self.result_config = cfg
-            self.root.after(0, self._on_publish_success)
+            self._schedule_ui(self._on_publish_success)
         except Exception as exc:
             logger.warning(f"Ошибка при публикации выбранного мира: {exc}")
-            self.root.after(0, lambda: self._on_activation_error(exc))
+            self._schedule_ui(lambda: self._on_activation_error(exc))
 
     def _on_publish_success(self) -> None:
         """Обрабатывает успешную публикацию мира."""
@@ -961,7 +970,7 @@ class FirstRunSetupWindow:
             # Случай А1: на сервере уже есть мир -> мгновенный запуск
             if server_has_save:
                 logger.info("На сервере уже есть активный мир. Селектор пропускается.")
-                self.root.after(0, self._on_activation_success)
+                self._schedule_ui(self._on_activation_success)
                 return
 
             # Случай А2: сервер пустой -> проверяем локальные сохранения
@@ -973,16 +982,16 @@ class FirstRunSetupWindow:
 
             if not local_saves:
                 logger.info("Локальных сохранений нет. Запуск игры для создания нового мира.")
-                self.root.after(0, self._on_activation_success)
+                self._schedule_ui(self._on_activation_success)
                 return
 
             # Есть локальные сохранения -> переход на Шаг 2 в UI-потоке
             logger.info(f"Сервер пуст, найдено {len(local_saves)} локальных сохранений. Переход на Шаг 2.")
-            self.root.after(0, lambda: self._transition_to_empty_server_world_selection(cfg, local_saves))
+            self._schedule_ui(lambda: self._transition_to_empty_server_world_selection(cfg, local_saves))
 
         except Exception as exc:
             logger.warning(f"Ошибка при активации инвайт-кода: {exc}")
-            self.root.after(0, lambda: self._on_activation_error(exc))
+            self._schedule_ui(lambda: self._on_activation_error(exc))
 
     def _on_activation_success(self, cfg: Optional[ClientConfig] = None) -> None:
         """Обрабатывает успешную активацию."""

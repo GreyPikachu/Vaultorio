@@ -45,6 +45,27 @@ def _get_server_config(
     return cfg
 
 
+def _detect_public_ip() -> str:
+    """Пытается определить внешний публичный IPv4 адрес сервера."""
+    import urllib.request
+    services = [
+        "https://api.ipify.org",
+        "https://icanhazip.com",
+        "https://ifconfig.me/ip",
+    ]
+    for url in services:
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "curl/7.68.0"})
+            with urllib.request.urlopen(req, timeout=1.5) as resp:
+                ip = resp.read().decode("utf-8").strip()
+                parts = ip.split(".")
+                if len(parts) == 4 and all(p.isdigit() and 0 <= int(p) <= 255 for p in parts):
+                    return ip
+        except Exception:
+            continue
+    return "127.0.0.1"
+
+
 def handle_create_invite(args: argparse.Namespace) -> int:
     """Обрабатывает команду create-invite."""
     try:
@@ -69,8 +90,11 @@ def handle_create_invite(args: argparse.Namespace) -> int:
 
         hub_url = (args.hub_url or "").strip()
         if not hub_url:
-            # Автоматическое определение по умолчанию из конфига
-            host = config.http_host if config.http_host != "0.0.0.0" else "127.0.0.1"
+            # Автоматическое определение по умолчанию из конфига или внешнего IP
+            if config.http_host != "0.0.0.0":
+                host = config.http_host
+            else:
+                host = _detect_public_ip()
             hub_url = f"http://{host}:{config.http_port}"
 
         stun_host = (args.stun_host or "").strip()
