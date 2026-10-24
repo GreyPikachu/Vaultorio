@@ -171,6 +171,7 @@ class FirstRunSetupWindow:
         on_uninstall_callback: Optional[Callable[[Path], Any]] = None,
         prompt_message: Optional[str] = None,
         existing_config: Optional[ClientConfig] = None,
+        auto_connect: bool = False,
     ) -> None:
         """Инициализирует окно настройки.
 
@@ -184,6 +185,7 @@ class FirstRunSetupWindow:
             on_uninstall_callback: Callback удаления перехватчика в installer_mode.
             prompt_message: Дополнительное пояснительное сообщение в шапке окна.
             existing_config: Уже существующая конфигурация клиента (при открытии по Shift).
+            auto_connect: Режим автоматического фонового подключения со спиннером.
         """
         import tkinter as tk
         from tkinter import ttk
@@ -201,25 +203,30 @@ class FirstRunSetupWindow:
         self.prompt_message = prompt_message
         self.existing_config = existing_config
         self.is_already_configured = bool(self.existing_config and self.existing_config.is_configured())
+        self.auto_connect = bool(auto_connect and self.is_already_configured)
 
         self.server_has_save: Optional[bool] = None
         self.inputs_card: Optional[Any] = None
         self.world_card: Optional[Any] = None
         self.world_title_lbl: Optional[Any] = None
 
-        if self.is_already_configured and self.existing_config:
+        if self.auto_connect:
+            self.step = "auto_connect"
+        elif self.is_already_configured and self.existing_config:
             try:
                 hub_client = HubClient(config=self.existing_config, http_client=self.http_client)
-                st = hub_client.get_status()
+                st = hub_client.get_status(timeout=5.0)
                 self.server_has_save = bool(st.get("save_exists") or st.get("save", {}).get("exists"))
             except Exception as e:
                 logger.debug(f"Не удалось получить статус сервера при открытии окна: {e}")
                 self.server_has_save = True
 
-        if self.is_already_configured and self.server_has_save is False:
-            self.step = "select_initial_world"
+            if self.server_has_save is False:
+                self.step = "select_initial_world"
+            else:
+                self.step = "manage_world"
         else:
-            self.step = "manage_world" if self.is_already_configured else "enter_invite"
+            self.step = "enter_invite"
 
         self.result_config: Optional[ClientConfig] = None
         self.is_activating = False
@@ -726,7 +733,7 @@ class FirstRunSetupWindow:
             padx=12,
             pady=10,
         )
-        if not (self.is_already_configured and self.server_has_save is False):
+        if self.step != "auto_connect" and not (self.is_already_configured and self.server_has_save is False):
             self.inputs_card.pack(fill=tk.X, pady=(0, 10))
 
         # Поле 1: Код Дружбы
@@ -816,7 +823,9 @@ class FirstRunSetupWindow:
                 self.game_path_entry.bind("<KeyPress>", self._on_entry_key)
 
         # 6. Строка состояния (Status Bar)
-        if self.is_already_configured:
+        if self.step == "auto_connect":
+            initial_status = "Пожалуйста, подождите. Идет подключение к облачной игре..."
+        elif self.is_already_configured:
             if self.server_has_save is False:
                 initial_status = "Сервер подключен, но пуст. Выберите мир для загрузки."
             else:
@@ -889,22 +898,32 @@ class FirstRunSetupWindow:
         self.btn_frame.pack(fill=tk.X, side=tk.BOTTOM)
         btn_frame = self.btn_frame
 
-        if self.installer_mode:
+        if self.step == "auto_connect":
+            action_text = "Сменить мир / Настройки (Shift)"
+            action_style = "Secondary.TButton"
+            action_cmd = self._transition_to_manage_world
+        elif self.installer_mode:
             action_text = "Установить и подключить"
+            action_style = "Accent.TButton"
+            action_cmd = self._on_activate_click
         elif self.is_already_configured:
             action_text = (
                 "Загрузить мир на сервер и играть"
                 if self.server_has_save is False
                 else "Применить и запустить игру"
             )
+            action_style = "Accent.TButton"
+            action_cmd = self._on_activate_click
         else:
             action_text = "Подключить и продолжить"
+            action_style = "Accent.TButton"
+            action_cmd = self._on_activate_click
 
         self.action_btn = ttk.Button(
             btn_frame,
             text=action_text,
-            style="Accent.TButton",
-            command=self._on_activate_click,
+            style=action_style,
+            command=action_cmd,
         )
         self.action_btn.pack(fill=tk.X, pady=(0, 6))
 
@@ -934,11 +953,105 @@ class FirstRunSetupWindow:
             )
             self.uninstall_btn.pack(fill=tk.X)
 
+        if self.step == "auto_connect":
+            self.progress_card.pack(fill=tk.X, pady=(0, 10))
+            self.progress_title_lbl.config(text="Подключение к облачному миру...")
+            self.progress_bar.config(mode="indeterminate")
+            try:
+                self.progress_bar.start(15)
+            except Exception:
+                pass
+            self.progress_bytes_lbl.config(text="Связь с сервером Vaultorio...")
+            self.progress_speed_lbl.config(text="")
+
+            worker = threading.Thread(
+                target=self._auto_connect_worker,
+                daemon=True,
+                name="AutoConnectWorker",
+            )
+            worker.start()
+
         # Устанавливаем фокус ввода при открытии окна на первое поле
         try:
             self.code_entry.focus_set()
         except Exception:
             pass
+
+    def _transition_to_manage_world(self) -> None:
+        """Переключает окно из режима автоподключения в режим управления миром."""
+        self.step = "manage_world"
+        try:
+            self.progress_bar.stop()
+        except Exception:
+            pass
+        self.progress_card.pack_forget()
+        if self.inputs_card:
+            self.inputs_card.pack(fill=self.tk.X, pady=(0, 10))
+        if self.world_card:
+            self.world_card.pack(fill=self.tk.X, pady=(0, 10))
+        self.action_btn.config(
+            text="Применить и запустить игру",
+            style="Accent.TButton",
+            command=self._on_activate_click,
+        )
+        self.set_status("Сервер подключен. Выберите мир и нажмите «Применить и запустить».", color=COLOR_INFO)
+
+    def _auto_connect_worker(self) -> None:
+        """Фоновый рабочий поток для автоматического подключения к серверу при обычном запуске."""
+        try:
+            hub_client = HubClient(config=self.existing_config, http_client=self.http_client)
+            # Щедрый таймаут 20 секунд для нестабильного Wi-Fi
+            st = hub_client.get_status(timeout=20.0)
+            self.server_has_save = bool(st.get("save_exists") or st.get("save", {}).get("exists"))
+
+            if self.step != "auto_connect":
+                return
+
+            if self.server_has_save is False:
+                local_saves = []
+                try:
+                    local_saves = self.env.list_local_saves(include_cloud_world=False)
+                except Exception:
+                    pass
+                if local_saves:
+                    self._schedule_ui(lambda: self._transition_to_empty_server_world_selection(self.existing_config, local_saves))
+                    return
+
+            self._schedule_ui(self._on_auto_connect_success)
+        except Exception as exc:
+            logger.warning(f"Ошибка при автоподключении к серверу: {exc}")
+            if self.step == "auto_connect":
+                self._schedule_ui(lambda e=exc: self._on_auto_connect_failure(e))
+
+    def _on_auto_connect_success(self) -> None:
+        """Обрабатывает успешное автоподключение."""
+        if self.step != "auto_connect":
+            return
+        try:
+            self.progress_bar.stop()
+            self.progress_bar.config(mode="determinate", value=100)
+        except Exception:
+            pass
+        self.progress_title_lbl.config(text="Сервер готов!")
+        self.progress_bytes_lbl.config(text="Облачный мир готов к запуску")
+        self.set_status("Подключено! Запуск игры Factorio...", color=COLOR_SUCCESS)
+        self.result_config = self.existing_config
+        self.root.after(400, self._close_window_cleanly)
+
+    def _on_auto_connect_failure(self, exc: Exception) -> None:
+        """Обрабатывает сбой автоподключения (таймаут / отсутствие сети)."""
+        if self.step != "auto_connect":
+            return
+        try:
+            self.progress_bar.stop()
+        except Exception:
+            pass
+        self.progress_card.pack_forget()
+        err_str = str(exc).lower()
+        err_msg = "Таймаут соединения" if "timed out" in err_str else "Сервер недоступен"
+        self.set_status(f"{err_msg}. Запуск игры в автономном режиме (OFFLINE)...", color=COLOR_WARNING)
+        self.result_config = ClientConfig(was_uninstalled=False, offline_mode=True)
+        self.root.after(1200, self._close_window_cleanly)
 
     # =========================================================================
     # Обработчики событий пользовательского интерфейса
@@ -1456,6 +1569,7 @@ def run_first_time_setup_gui(
     prompt_message: Optional[str] = None,
     existing_config: Optional[ClientConfig] = None,
     use_subprocess: bool = False,
+    auto_connect: bool = False,
 ) -> Optional[ClientConfig]:
     """Безопасно запускает графическое окно первичной настройки.
 
@@ -1473,6 +1587,7 @@ def run_first_time_setup_gui(
         prompt_message: Текст информационного баннера в окне.
         existing_config: Уже существующая конфигурация (при повторном открытии по Shift).
         use_subprocess: Если True, окно запускается в отдельном дочернем процессе.
+        auto_connect: Режим автоматического фонового подключения со спиннером.
 
     Returns:
         Экземпляр сконфигурированного ClientConfig, либо None если окно закрыто
@@ -1492,6 +1607,7 @@ def run_first_time_setup_gui(
             installer_mode=installer_mode,
             prompt_message=prompt_message,
             existing_config=existing_config,
+            auto_connect=auto_connect,
         )
 
     # Проверка переменной окружения для headless-тестов с мок-активацией
@@ -1536,6 +1652,7 @@ def run_first_time_setup_gui(
             on_uninstall_callback=on_uninstall_callback,
             prompt_message=prompt_message,
             existing_config=existing_config,
+            auto_connect=auto_connect,
         )
         root.mainloop()
         if getattr(app, "was_uninstalled", False):
@@ -1583,6 +1700,7 @@ def run_setup_gui_subprocess_entry(args_file: Path | str, result_file: Path | st
         installer_mode = bool(args_raw.get("installer_mode", False))
         prompt_message = args_raw.get("prompt_message")
         existing_config_dict = args_raw.get("existing_config_dict")
+        auto_connect = bool(args_raw.get("auto_connect", False))
 
         env = FactorioEnvironment(
             custom_game_root=Path(custom_game_root) if custom_game_root else None,
@@ -1609,6 +1727,7 @@ def run_setup_gui_subprocess_entry(args_file: Path | str, result_file: Path | st
             prompt_message=prompt_message,
             existing_config=existing_config,
             use_subprocess=False,
+            auto_connect=auto_connect,
         )
 
         if cfg is not None:
@@ -1641,6 +1760,7 @@ def run_setup_gui_in_subprocess(
     installer_mode: bool = False,
     prompt_message: Optional[str] = None,
     existing_config: Optional[ClientConfig] = None,
+    auto_connect: bool = False,
 ) -> Optional[ClientConfig]:
     """Запускает GUI первого запуска в отдельном изолированном дочернем процессе.
 
@@ -1659,6 +1779,7 @@ def run_setup_gui_in_subprocess(
         "installer_mode": bool(installer_mode),
         "prompt_message": prompt_message,
         "existing_config_dict": existing_config.to_dict() if existing_config else None,
+        "auto_connect": bool(auto_connect),
     }
 
     with tempfile.TemporaryDirectory(prefix="factorio_gui_") as tmp_dir_str:

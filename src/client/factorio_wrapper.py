@@ -180,6 +180,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         custom_core_bin=wrapper_args.wrapper_core_bin,
         config_path=config_path,
         force_setup_gui=wrapper_args.wrapper_setup,
+        show_launcher_gui=True,
     )
 
     try:

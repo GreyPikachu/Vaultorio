@@ -177,11 +177,13 @@ class SessionOrchestrator:
         force_setup_gui: bool = False,
         shift_detector: Optional[Callable[[], bool]] = None,
         exec_fn: Optional[Callable[[str, List[str]], None]] = None,
+        show_launcher_gui: bool = False,
     ) -> None:
         self.env = env or FactorioEnvironment()
         self.config_path = Path(config_path).resolve() if config_path else self.env.sync_config_path
         self.setup_gui_provider = setup_gui_provider
         self.force_setup_gui = bool(force_setup_gui)
+        self.show_launcher_gui = bool(show_launcher_gui)
         self.shift_detector = shift_detector
         self._exec_fn = exec_fn or os.execv
 
@@ -348,19 +350,29 @@ class SessionOrchestrator:
              копирует 127.0.0.1:34198 в буфер обмена и запускает GuestP2PProxy + GuestHandoverWatcher.
         """
         with self._lock:
-            # Шаг 0: Первичная настройка через GUI или вызов по Shift / force_setup_gui
+            # Шаг 0: Первичная настройка через GUI или вызов по Shift / force_setup_gui / show_launcher_gui
             is_shift = (
                 self.shift_detector()
                 if self.shift_detector is not None
                 else is_shift_key_pressed()
             )
-            should_run_setup = (not self.config.is_configured()) or self.force_setup_gui or is_shift
+            should_run_setup = (
+                (not self.config.is_configured())
+                or self.force_setup_gui
+                or is_shift
+                or self.show_launcher_gui
+            )
 
             if should_run_setup:
+                is_auto_connect = bool(self.config.is_configured() and not is_shift and not self.force_setup_gui)
                 reason_log = (
-                    "отсутствует device_token"
-                    if not self.config.is_configured()
-                    else ("флаг force_setup_gui" if self.force_setup_gui else "зажата клавиша Shift")
+                    "режим автоподключения (Launcher)"
+                    if is_auto_connect
+                    else (
+                        "отсутствует device_token"
+                        if not self.config.is_configured()
+                        else ("флаг force_setup_gui" if self.force_setup_gui else "зажата клавиша Shift")
+                    )
                 )
                 logger.info(f"Запуск окна настроек GUI ({reason_log})...")
                 gui_runner = self.setup_gui_provider
@@ -379,6 +391,7 @@ class SessionOrchestrator:
                             "installer_mode": False,
                             "http_client": None,
                             "existing_config": self.config,
+                            "auto_connect": is_auto_connect,
                         }
                         try:
                             import inspect
@@ -453,9 +466,9 @@ class SessionOrchestrator:
             self.player_name = self.env.resolve_or_init_player_username(fallback_name=fallback)
             logger.info(f"Инициализация сессии для игрока: '{self.player_name}'")
 
-            # Шаг 3: Проверка статуса сервера (быстрый таймаут 5с для моментального офлайна при отсутствии сети)
+            # Шаг 3: Проверка статуса сервера (щедрый таймаут 20с для стабильной работы по Wi-Fi)
             try:
-                status = self.hub_client.get_status(timeout=5.0)
+                status = self.hub_client.get_status(timeout=20.0)
             except Exception as err:
                 # Проверка на 403 Forbidden (токен устройства отозван администратором)
                 is_forbidden = False
@@ -590,10 +603,6 @@ class SessionOrchestrator:
                     )
 
                     # Синхронизация сохранения перед стартом
-                    show_role_banner(
-                        "Загрузка актуального мира из облачного сейфа... Игра скоро запустится!",
-                        duration_sec=10.0,
-                    )
                     sync_res = self.hub_client.sync_save_before_host(self.env, status=status)
                     if sync_res.get("mods_mismatch"):
                         logger.warning(
