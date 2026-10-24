@@ -385,28 +385,38 @@ class FactorioWrapperInstaller:
     def _create_fallback_wrapper(self, target_bin: Path, core_bin: Path) -> None:
         """Создает резервный исполняемый скрипт-перехватчик, если нет скомпилированного PyInstaller-бинарника."""
         is_windows = target_bin.suffix.lower() == ".exe"
+        python_bin = sys.executable
+        project_root = Path(__file__).resolve().parent.parent.parent
         if is_windows:
             # Для Windows создаем batch-обертку
             cmd_script = target_bin.with_suffix(".cmd")
             cmd_script.write_text(
                 f"@echo off\n"
-                f"echo [Factorio Coop Wrapper] Starting session...\n"
-                f'"{core_bin}" %*\n',
+                f'set "PYTHONPATH={project_root};%PYTHONPATH%"\n'
+                f'"{python_bin}" -m src.client.factorio_wrapper --wrapper-core-bin "{core_bin}" %*\n',
                 encoding="utf-8",
             )
             # В качестве заглушки копируем ядро
             shutil.copy2(core_bin, target_bin)
         else:
             # Для macOS/Linux создаем шелл-скрипт запуска перехватчика
-            python_bin = sys.executable
-            project_root = Path(__file__).resolve().parent.parent.parent
             target_bin.write_text(
                 f"#!/bin/bash\n"
                 f"# Factorio P2P Cloud Sync Wrapper\n"
                 f'export PYTHONPATH="{project_root}:${{PYTHONPATH}}"\n'
-                f'exec "{python_bin}" -m src.client.factorio_wrapper "$@"\n',
+                f'exec "{python_bin}" -m src.client.factorio_wrapper --wrapper-core-bin "{core_bin}" "$@"\n',
                 encoding="utf-8",
             )
+            # На macOS подписываем ad-hoc ядро factorio_core, чтобы AMFI / Hardened Runtime разрешали запуск
+            if sys.platform == "darwin" and shutil.which("codesign"):
+                try:
+                    subprocess.run(
+                        ["codesign", "-s", "-", "--force", str(core_bin)],
+                        check=False,
+                        capture_output=True,
+                    )
+                except Exception as cs_err:
+                    logger.debug(f"codesign не выполнен для {core_bin}: {cs_err}")
 
     def uninstall(
         self,
@@ -433,6 +443,15 @@ class FactorioWrapperInstaller:
             game_bin.unlink(missing_ok=True)
             shutil.move(str(core_bin), str(game_bin))
             os.chmod(game_bin, 0o755)
+            if sys.platform == "darwin" and shutil.which("codesign"):
+                try:
+                    subprocess.run(
+                        ["codesign", "-s", "-", "--force", str(game_bin)],
+                        check=False,
+                        capture_output=True,
+                    )
+                except Exception:
+                    pass
             logger.info(f"Оригинальный бинарник игры успешно восстановлен в {game_bin.name}")
 
             # Удаление конфигурационного файла factorio_sync_config.json

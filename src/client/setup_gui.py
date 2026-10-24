@@ -951,8 +951,10 @@ class FirstRunSetupWindow:
             logger.warning(f"Ошибка при активации инвайт-кода: {exc}")
             self.root.after(0, lambda: self._on_activation_error(exc))
 
-    def _on_activation_success(self) -> None:
+    def _on_activation_success(self, cfg: Optional[ClientConfig] = None) -> None:
         """Обрабатывает успешную активацию."""
+        if cfg is not None:
+            self.result_config = cfg
         self.set_status("Готово! Сервер подключен. Запуск игры...", color=COLOR_SUCCESS)
         self.root.after(600, self.root.destroy)
 

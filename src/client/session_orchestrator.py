@@ -242,9 +242,9 @@ class SessionOrchestrator:
         if env_bin:
             candidates.append(Path(env_bin).resolve())
 
+        current_os = platform.system()
         game_root = self.env.game_root
         if game_root is not None:
-            current_os = platform.system()
             if current_os == "Windows":
                 candidates.extend([
                     game_root / "bin" / "x64" / "factorio_core.exe",
@@ -254,11 +254,11 @@ class SessionOrchestrator:
                 ])
             elif current_os == "Darwin":
                 candidates.extend([
-                    game_root / "Factorio.app" / "Contents" / "MacOS" / "factorio_core",
                     game_root / "Contents" / "MacOS" / "factorio_core",
+                    game_root / "Factorio.app" / "Contents" / "MacOS" / "factorio_core",
                     game_root / "factorio_core",
-                    game_root / "Factorio.app" / "Contents" / "MacOS" / "factorio",
                     game_root / "Contents" / "MacOS" / "factorio",
+                    game_root / "Factorio.app" / "Contents" / "MacOS" / "factorio",
                     game_root / "factorio",
                 ])
             else:  # Linux
@@ -268,6 +268,49 @@ class SessionOrchestrator:
                     game_root / "bin" / "x64" / "factorio",
                     game_root / "factorio",
                 ])
+
+        # Стандартные системные пути установки игры (если game_root не задан или файл не найден в game_root)
+        if current_os == "Windows":
+            for env_var in ("ProgramFiles", "ProgramFiles(x86)", "ProgramW6432", "LOCALAPPDATA"):
+                val = os.getenv(env_var)
+                if val:
+                    base = Path(val)
+                    candidates.extend([
+                        base / "Factorio" / "bin" / "x64" / "factorio_core.exe",
+                        base / "Steam" / "steamapps" / "common" / "Factorio" / "bin" / "x64" / "factorio_core.exe",
+                        base / "Programs" / "Factorio" / "bin" / "x64" / "factorio_core.exe",
+                        base / "Factorio" / "bin" / "x64" / "factorio.exe",
+                        base / "Steam" / "steamapps" / "common" / "Factorio" / "bin" / "x64" / "factorio.exe",
+                        base / "Programs" / "Factorio" / "bin" / "x64" / "factorio.exe",
+                    ])
+            for drive in ("C:", "D:", "E:"):
+                candidates.extend([
+                    Path(f"{drive}/Games/Factorio/bin/x64/factorio_core.exe"),
+                    Path(f"{drive}/Factorio/bin/x64/factorio_core.exe"),
+                    Path(f"{drive}/Games/Factorio/bin/x64/factorio.exe"),
+                    Path(f"{drive}/Factorio/bin/x64/factorio.exe"),
+                ])
+        elif current_os == "Darwin":
+            candidates.extend([
+                Path("/Applications/Factorio.app/Contents/MacOS/factorio_core"),
+                Path.home() / "Applications" / "Factorio.app" / "Contents" / "MacOS" / "factorio_core",
+                Path.home() / "Library/Application Support/Steam/steamapps/common/Factorio/Factorio.app/Contents/MacOS/factorio_core",
+                Path("/Applications/Factorio/factorio_core"),
+                Path("/Applications/Factorio.app/Contents/MacOS/factorio"),
+                Path.home() / "Applications" / "Factorio.app" / "Contents" / "MacOS" / "factorio",
+                Path.home() / "Library/Application Support/Steam/steamapps/common/Factorio/Factorio.app/Contents/MacOS/factorio",
+            ])
+        else:  # Linux
+            candidates.extend([
+                Path.home() / ".factorio" / "bin" / "x64" / "factorio_core",
+                Path("/opt/factorio/bin/x64/factorio_core"),
+                Path.home() / ".local/share/Steam/steamapps/common/Factorio/bin/x64/factorio_core",
+                Path.home() / ".steam/steam/steamapps/common/Factorio/bin/x64/factorio_core",
+                Path.home() / ".factorio" / "bin" / "x64" / "factorio",
+                Path("/opt/factorio/bin/x64/factorio"),
+                Path.home() / ".local/share/Steam/steamapps/common/Factorio/bin/x64/factorio",
+                Path.home() / ".steam/steam/steamapps/common/Factorio/bin/x64/factorio",
+            ])
 
         # Проверка кандидатов по файловой системе
         for cand in candidates:
