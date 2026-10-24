@@ -219,6 +219,7 @@ class FirstRunSetupWindow:
 
         # Определение папки игры
         self.game_path: Optional[Path] = self.env.game_root
+        self.was_uninstalled: bool = False
 
         self._configure_dark_theme()
         self._init_window()
@@ -644,21 +645,29 @@ class FirstRunSetupWindow:
 
         # Дополнительные кнопки
         if self.installer_mode:
-            uninstall_btn = ttk.Button(
+            self.uninstall_btn = ttk.Button(
                 btn_frame,
                 text="Удалить перехватчик (Вернуть чистую игру)",
                 style="Secondary.TButton",
                 command=self._on_uninstall_click,
             )
-            uninstall_btn.pack(fill=tk.X)
+            self.uninstall_btn.pack(fill=tk.X)
         else:
-            cancel_btn = ttk.Button(
+            self.cancel_btn = ttk.Button(
                 btn_frame,
                 text="Запустить игру автономно (без сервера)",
                 style="Secondary.TButton",
                 command=self._on_cancel_click,
             )
-            cancel_btn.pack(fill=tk.X)
+            self.cancel_btn.pack(fill=tk.X, pady=(0, 6))
+
+            self.uninstall_btn = ttk.Button(
+                btn_frame,
+                text="Удалить перехватчик (Вернуть чистую игру)",
+                style="Secondary.TButton",
+                command=self._on_uninstall_click,
+            )
+            self.uninstall_btn.pack(fill=tk.X)
 
     # =========================================================================
     # Обработчики событий пользовательского интерфейса
@@ -715,28 +724,52 @@ class FirstRunSetupWindow:
 
     def _on_uninstall_click(self) -> None:
         """Запускает процесс деинсталляции перехватчика."""
-        if not self.game_path:
-            self.set_status("Укажите папку с игрой для удаления перехватчика", color=COLOR_ERROR)
+        game_dir = self.game_path or (self.env.game_root if self.env else None)
+        if not game_dir:
+            try:
+                from src.installer.installer import FactorioWrapperInstaller
+                game_dir = FactorioWrapperInstaller().find_game_installation()
+            except Exception:
+                game_dir = None
+
+        if not game_dir:
+            self.set_status("Не удалось найти папку с игрой Factorio для удаления перехватчика", color=COLOR_ERROR)
             return
 
         from tkinter import messagebox
 
         confirm = messagebox.askyesno(
-            "Подтверждение удаления",
-            "Вы действительно хотите удалить перехватчик и вернуть оригинальную чистую игру Factorio?",
+            "Удаление перехватчика",
+            "Вы действительно хотите удалить перехватчик и вернуть оригинальную чистую игру Factorio?\n\n"
+            "- Оригинальный исполняемый файл игры будет восстановлен на свое место.\n"
+            "- Файлы конфигурации синхронизатора будут удалены.\n"
+            "- Ваши игровые сохранения (миры) останутся в полной сохранности.\n\n"
+            "Продолжить удаление?",
         )
         if not confirm:
             return
 
-        if self.on_uninstall_callback:
-            try:
-                res = self.on_uninstall_callback(self.game_path)
-                msg = res.get("message", "Перехватчик успешно удален") if isinstance(res, dict) else "Успешно удалено"
-                messagebox.showinfo("Успешно", msg)
-                self.root.destroy()
-            except Exception as e:
-                logger.error(f"Ошибка при удалении перехватчика: {e}")
-                self.set_status(f"Ошибка удаления: {e}", color=COLOR_ERROR)
+        try:
+            if self.on_uninstall_callback:
+                res = self.on_uninstall_callback(game_dir)
+            else:
+                from src.installer.installer import FactorioWrapperInstaller
+                installer = FactorioWrapperInstaller()
+                res = installer.uninstall(game_dir=game_dir)
+
+            self.was_uninstalled = True
+            self.result_config = ClientConfig(was_uninstalled=True)
+
+            msg = res.get("message", "Перехватчик успешно удален") if isinstance(res, dict) else "Успешно удалено"
+            messagebox.showinfo(
+                "Удаление завершено",
+                f"{msg}\n\nОригинальная игра Factorio восстановлена в первоначальное состояние. "
+                f"Теперь игра будет запускаться стандартным образом без синхронизатора.",
+            )
+            self.root.destroy()
+        except Exception as e:
+            logger.error(f"Ошибка при удалении перехватчика: {e}")
+            self.set_status(f"Ошибка удаления: {e}", color=COLOR_ERROR)
 
     def _on_activate_click(self) -> None:
         """Валидирует ввод и запускает фоновую активацию или смену мира."""
@@ -1054,6 +1087,8 @@ def run_first_time_setup_gui(
             existing_config=existing_config,
         )
         root.mainloop()
+        if getattr(app, "was_uninstalled", False):
+            return ClientConfig(was_uninstalled=True)
         return app.result_config
     except Exception as fatal_gui_err:
         logger.error(f"Критическая ошибка при выполнении GUI первого запуска: {fatal_gui_err}")

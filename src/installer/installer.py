@@ -460,7 +460,30 @@ class FactorioWrapperInstaller:
 
             # Восстановление спрятанных сейвов из .cloud_stash/ обратно в корень saves/
             env = FactorioEnvironment(custom_game_root=gdir)
+            try:
+                env.sync_config_path.unlink(missing_ok=True)
+            except Exception:
+                pass
             env.restore_hidden_cloud_save()
+
+            # Удаление временной директории .cloud_stash (если осталась пустой)
+            cloud_stash_dir = env.saves_dir / ".cloud_stash"
+            if cloud_stash_dir.exists() and cloud_stash_dir.is_dir():
+                try:
+                    for f in cloud_stash_dir.iterdir():
+                        shutil.move(str(f), str(env.saves_dir / f.name))
+                    cloud_stash_dir.rmdir()
+                except Exception as stash_err:
+                    logger.warning(f"Ошибка при очистке .cloud_stash: {stash_err}")
+
+            # Удаление Windows fallback-скрипта (.cmd)
+            game_bin.with_suffix(".cmd").unlink(missing_ok=True)
+
+            # Удаление лог-файлов перехватчика
+            for log_name in ["factorio_wrapper.log", "factorio_sync.log"]:
+                (gdir / log_name).unlink(missing_ok=True)
+                if getattr(env, "user_data_dir", None) and env.user_data_dir != gdir:
+                    (env.user_data_dir / log_name).unlink(missing_ok=True)
 
             return {
                 "status": "uninstalled",

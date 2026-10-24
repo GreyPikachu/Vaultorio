@@ -790,3 +790,98 @@ class TestFirstRunDarkModeAndCleanLabels(unittest.TestCase):
             style = str(btn.cget("style"))
             self.assertIn(style, ["Accent.TButton", "Secondary.TButton"])
 
+
+class TestGUIUninstallerIntegration(unittest.TestCase):
+    """Тестирование функционала кнопки деинсталлятора в GUI (Задача 024)."""
+
+    def setUp(self):
+        self.temp_dir = Path(tempfile.mkdtemp(prefix="test_gui_uninstall_")).resolve()
+        self.user_data = (self.temp_dir / "userdata").resolve()
+        self.game_root = (self.temp_dir / "gameroot").resolve()
+        self.user_data.mkdir(parents=True)
+        self.game_root.mkdir(parents=True)
+
+        self.env = FactorioEnvironment(
+            custom_game_root=self.game_root,
+            custom_user_data_dir=self.user_data,
+        )
+        self.env.set_player_username("PikachuUninstallTest")
+        self.root = tk.Tk()
+        self.root.deiconify()
+
+    def tearDown(self):
+        try:
+            self.root.destroy()
+        except Exception:
+            pass
+        import shutil
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_uninstaller_button_present_in_normal_mode(self):
+        """Кнопка деинсталляции присутствует в обычном режиме (installer_mode=False)."""
+        from tkinter import ttk
+        app = FirstRunSetupWindow(root=self.root, env=self.env, installer_mode=False)
+        self.root.update()
+
+        self.assertTrue(hasattr(app, "uninstall_btn"))
+        self.assertIsInstance(app.uninstall_btn, ttk.Button)
+        self.assertEqual(app.uninstall_btn.cget("text"), "Удалить перехватчик (Вернуть чистую игру)")
+        self.assertEqual(str(app.uninstall_btn.cget("style")), "Secondary.TButton")
+
+    def test_uninstaller_cancelled_by_user(self):
+        """При отказе в окне подтверждения (askyesno=False) деинсталляция отменяется."""
+        app = FirstRunSetupWindow(root=self.root, env=self.env, installer_mode=False)
+        self.root.update()
+
+        with patch("tkinter.messagebox.askyesno", return_value=False) as mock_ask, \
+             patch("tkinter.messagebox.showinfo") as mock_info:
+            app._on_uninstall_click()
+            mock_ask.assert_called_once()
+            mock_info.assert_not_called()
+            self.assertFalse(app.was_uninstalled)
+
+    def test_uninstaller_confirmed_and_safely_executed(self):
+        """При подтверждении вызывается деинсталляция, сохраняются сейвы и закрывается окно."""
+        saves_dir = self.env.saves_dir
+        saves_dir.mkdir(parents=True, exist_ok=True)
+        player_save = saves_dir / "Судные дни.zip"
+        player_save.write_bytes(b"valuable_player_data")
+
+        mock_uninstall_cb = MagicMock(return_value={"status": "uninstalled", "message": "Успешно удалено"})
+        app = FirstRunSetupWindow(
+            root=self.root,
+            env=self.env,
+            installer_mode=False,
+            on_uninstall_callback=mock_uninstall_cb,
+        )
+        self.root.update()
+
+        with patch("tkinter.messagebox.askyesno", return_value=True) as mock_ask, \
+             patch("tkinter.messagebox.showinfo") as mock_info:
+            app._on_uninstall_click()
+            mock_ask.assert_called_once()
+            mock_info.assert_called_once()
+            mock_uninstall_cb.assert_called_once_with(self.game_root)
+            self.assertTrue(app.was_uninstalled)
+            self.assertTrue(app.result_config.was_uninstalled)
+
+        # Проверяем, что сейв игрока остался абсолютно нетронутым
+        self.assertTrue(player_save.is_file())
+        self.assertEqual(player_save.read_bytes(), b"valuable_player_data")
+
+    def test_session_orchestrator_handles_uninstalled_config_cleanly(self):
+        """SessionOrchestrator корректно завершает работу с кодом 0 при деинсталляции через GUI."""
+        cfg = ClientConfig(hub_http_url="http://127.0.0.1:8088", device_token="tok", player_name="Pikachu")
+        orchestrator = SessionOrchestrator(
+            config=cfg,
+            env=self.env,
+            setup_gui_provider=lambda **kwargs: ClientConfig(was_uninstalled=True),
+            force_setup_gui=True,
+        )
+
+        with patch.object(orchestrator, "launch_game") as mock_launch:
+            exit_code = orchestrator.run()
+            self.assertEqual(exit_code, 0)
+            mock_launch.assert_not_called()
+
+

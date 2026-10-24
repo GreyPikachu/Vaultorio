@@ -378,6 +378,15 @@ class SessionOrchestrator:
                             http_client=getattr(self.hub_client, "_client", None),
                             existing_config=self.config,
                         )
+                        if new_config and getattr(new_config, "was_uninstalled", False):
+                            logger.info("Перехватчик был деинсталлирован пользователем через GUI. Завершение работы.")
+                            self.role = RoleType.OFFLINE
+                            self.is_prepared = True
+                            return {
+                                "role": self.role,
+                                "reason": "uninstalled_by_user",
+                            }
+
                         if new_config and new_config.is_configured():
                             self.config = new_config
                             if self._owns_hub_client:
@@ -464,6 +473,15 @@ class SessionOrchestrator:
                                 http_client=getattr(self.hub_client, "_client", None),
                                 prompt_message="Доступ устройства был обновлен администратором. Пожалуйста, введите новый Код Дружбы.",
                             )
+                            if new_config and getattr(new_config, "was_uninstalled", False):
+                                logger.info("Перехватчик был деинсталлирован пользователем через GUI. Завершение работы.")
+                                self.role = RoleType.OFFLINE
+                                self.is_prepared = True
+                                return {
+                                    "role": self.role,
+                                    "reason": "uninstalled_by_user",
+                                }
+
                             if new_config and new_config.is_configured():
                                 self.config = new_config
                                 if self._owns_hub_client:
@@ -738,7 +756,10 @@ class SessionOrchestrator:
     ) -> int:
         """Запускает полный цикл работы перехватчика: подготовка -> запуск -> teardown."""
         try:
-            self.prepare_session()
+            prep_report = self.prepare_session()
+            if prep_report.get("reason") == "uninstalled_by_user":
+                logger.info("Перехватчик был деинсталлирован пользователем. Завершение работы без запуска игры.")
+                return 0
             proc = self.launch_game(
                 executable_path=executable_path,
                 game_args=game_args,

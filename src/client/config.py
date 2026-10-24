@@ -32,6 +32,7 @@ class ClientConfig:
     device_id: str = ""
     connect_timeout_seconds: float = 5.0
     request_timeout_seconds: float = 30.0
+    was_uninstalled: bool = False
 
     def __post_init__(self) -> None:
         """Валидирует параметры конфигурации после инициализации."""
