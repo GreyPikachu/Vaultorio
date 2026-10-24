@@ -714,15 +714,7 @@ class FirstRunSetupWindow:
         code_row = tk.Frame(self.inputs_card, bg=COLOR_CARD)
         code_row.pack(fill=tk.X, pady=(4, 10))
 
-        initial_code = ""
-        try:
-            cb_text = self.root.clipboard_get().strip()
-            if cb_text.startswith("FCT1-") and len(cb_text) > 40:
-                initial_code = cb_text
-        except Exception:
-            pass
-
-        self.code_var = tk.StringVar(value=initial_code)
+        self.code_var = tk.StringVar(value="")
         self.code_entry = tk.Entry(
             code_row,
             textvariable=self.code_var,
@@ -853,13 +845,9 @@ class FirstRunSetupWindow:
             )
             self.uninstall_btn.pack(fill=tk.X)
 
-        # Устанавливаем фокус ввода при открытии окна
+        # Устанавливаем фокус ввода при открытии окна на первое поле
         try:
-            if initial_code:
-                self.pass_entry.focus_set()
-                self.set_status("Код Дружбы обнаружен в буфере обмена и подставлен", color=COLOR_INFO)
-            else:
-                self.code_entry.focus_set()
+            self.code_entry.focus_set()
         except Exception:
             pass
 
