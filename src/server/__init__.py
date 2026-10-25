@@ -12,6 +12,13 @@ from src.server.auth_manager import (
 )
 from src.server.config import ServerConfig, load_server_config
 from src.server.logger import get_logger, setup_server_logging
+from src.server.ai_chronicle import (
+    OpenRouterChronicleService,
+    clean_telegram_html,
+    format_events_for_llm,
+    format_fallback_chronicle_post,
+    should_process_report,
+)
 from src.server.ai_model_probe import (
     DEFAULT_FREE_VISION_CANDIDATES,
     POLLINATIONS_CHAT_URL,
@@ -33,15 +40,20 @@ __all__ = [
     "InvalidInviteTicketError",
     "InviteTicketAlreadyUsedError",
     "InviteTicketExpiredError",
+    "OpenRouterChronicleService",
     "POLLINATIONS_CHAT_URL",
     "RateLimitExceededError",
     "ServerConfig",
+    "clean_telegram_html",
     "create_sample_factorio_telemetry",
     "create_sample_test_png",
     "discover_openrouter_free_vision_models",
+    "format_events_for_llm",
+    "format_fallback_chronicle_post",
     "get_logger",
     "load_server_config",
     "probe_vision_endpoint",
+    "should_process_report",
     "SaveStorageManager",
     "SessionLockManager",
     "SessionState",

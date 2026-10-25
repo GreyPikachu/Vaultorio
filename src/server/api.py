@@ -48,6 +48,7 @@ from src.server.schemas import (
 )
 from src.server.session_manager import SessionLockManager
 from src.server.storage import InvalidSaveArchiveError, SaveStorageManager, StorageError
+from src.server.ai_chronicle import OpenRouterChronicleService, should_process_report
 from src.server.telegram_bot import TelegramBotService
 
 logger = get_logger("api")
@@ -103,6 +104,14 @@ async def lifespan(app: FastAPI):
         except Exception as exc:
             logger.warning("Error closing Telegram Bot Service in lifespan: %s", exc)
 
+    chronicle_srv: Optional[OpenRouterChronicleService] = getattr(app.state, "chronicle_service", None)
+    if chronicle_srv:
+        try:
+            await chronicle_srv.close()
+            logger.info("Chronicle Service closed in lifespan")
+        except Exception as exc:
+            logger.warning("Error closing Chronicle Service in lifespan: %s", exc)
+
 
 def get_client_ip(request: Request) -> str:
     """
@@ -131,6 +140,7 @@ def create_app(
     auth_manager: Optional[AuthManager] = None,
     enable_stun: bool = False,
     telegram_bot: Optional[TelegramBotService] = None,
+    chronicle_service: Optional[OpenRouterChronicleService] = None,
 ) -> FastAPI:
     """
     Application factory for the Factorio Safe HTTP API.
@@ -142,6 +152,7 @@ def create_app(
         auth_manager: Optional AuthManager instance for device token verification.
         enable_stun: If True, automatically launches UDP STUN Coordinator in lifespan.
         telegram_bot: Optional TelegramBotService instance for status notifications.
+        chronicle_service: Optional OpenRouterChronicleService instance for AI chronicle.
 
     Returns:
         FastAPI: Fully configured ASGI application.
@@ -155,6 +166,10 @@ def create_app(
         session_manager=app_session,
         storage_manager=app_storage,
         auth_manager=app_auth,
+    )
+    app_chronicle = chronicle_service or OpenRouterChronicleService(
+        settings=getattr(app_telegram, "settings", None),
+        config=app_config,
     )
 
     app = FastAPI(
@@ -171,6 +186,7 @@ def create_app(
     app.state.auth_manager = app_auth
     app.state.enable_stun = enable_stun
     app.state.telegram_bot = app_telegram
+    app.state.chronicle_service = app_chronicle
 
     def _dispatch_tg_hook(coro: Any) -> None:
         """Dispatches an asynchronous Telegram bot event task without blocking HTTP response."""
@@ -695,6 +711,83 @@ def create_app(
                 status_code=500,
                 content={"error": "reset_world_failed", "message": str(exc)},
             )
+
+    @app.post("/chronicle/report", dependencies=[Depends(verify_device_token)])
+    async def report_chronicle(
+        events_json: str = Form(...),
+        trigger_type: str = Form("hourly_summary"),
+        session_token: Optional[str] = Form(None),
+        screenshot: Optional[UploadFile] = File(None),
+    ) -> JSONResponse:
+        """
+        Receives gameplay chronicle telemetry and in-game screenshot from the client.
+        Queues AI chronicle generation (OpenRouter Vision / Pollinations) and Telegram post.
+        """
+        try:
+            events_data = json.loads(events_json)
+            events = events_data if isinstance(events_data, list) else []
+        except Exception as parse_err:
+            logger.warning("Could not parse events_json in /chronicle/report: %s", parse_err)
+            events = []
+
+        if not should_process_report(trigger_type, getattr(app_telegram, "settings", None)):
+            logger.debug("Chronicle report ignored due to bot schedule settings: %s", trigger_type)
+            return JSONResponse(
+                status_code=200,
+                content={"success": True, "ignored": True, "reason": "schedule_disabled"},
+            )
+
+        screenshot_bytes: Optional[bytes] = None
+        mime_type = "image/jpeg"
+        if screenshot:
+            try:
+                raw_bytes = await screenshot.read()
+                # Limit screenshot size to 15MB
+                if 0 < len(raw_bytes) <= 15 * 1024 * 1024:
+                    screenshot_bytes = raw_bytes
+                    if screenshot.filename and screenshot.filename.lower().endswith(".png"):
+                        mime_type = "image/png"
+                    elif screenshot.content_type:
+                        mime_type = screenshot.content_type
+            except Exception as read_err:
+                logger.warning("Failed to read uploaded screenshot in /chronicle/report: %s", read_err)
+
+        session_status = app_session.get_public_status()
+        host_name = session_status.get("host_name") or "Player"
+        started_at = session_status.get("started_at")
+        duration_min = 0
+        if started_at:
+            duration_min = max(0, int(time.time() - started_at) // 60)
+
+        async def _publish_chronicle() -> None:
+            try:
+                post_text, tier = await app_chronicle.generate_chronicle_post(
+                    events=events,
+                    trigger_type=trigger_type,
+                    host_name=host_name,
+                    session_duration_min=duration_min,
+                    screenshot_bytes=screenshot_bytes,
+                    mime_type=mime_type,
+                )
+                if screenshot_bytes:
+                    filename = "base_screenshot.png" if mime_type == "image/png" else "base_screenshot.jpg"
+                    await app_telegram.send_photo(
+                        photo_bytes=screenshot_bytes,
+                        caption=post_text,
+                        filename=filename,
+                    )
+                else:
+                    await app_telegram.send_message(text=post_text)
+                logger.info("Chronicle post published via tier '%s' for trigger '%s'", tier, trigger_type)
+            except Exception as post_err:
+                logger.error("Error generating or publishing chronicle: %s", post_err, exc_info=True)
+
+        _dispatch_tg_hook(_publish_chronicle())
+
+        return JSONResponse(
+            status_code=200,
+            content={"success": True, "status": "queued", "trigger_type": trigger_type},
+        )
 
     return app
 
