@@ -470,10 +470,67 @@ class TestTelegramBotServiceAsync(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(decoded["hub_http_url"], pkg["hub_url"])
         self.assertEqual(decoded["hub_stun_port"], pkg["stun_port"])
 
+    async def test_invite_custom_passphrase_flow(self):
+        """Verifies custom passphrase prompt, text input handling, and encrypted generation."""
+        from src.common.invite_codec import decode_invite_code
+
+        auth_mgr = AuthManager(config=self.config)
+        bot = TelegramBotService(
+            config=self.config,
+            auth_manager=auth_mgr,
+            client=self.mock_client,
+        )
+        bot.settings.bot_token = "123:test"
+        bot.settings.chat_id = 12345
+        bot.settings.admin_user_ids = [111]
+
+        # 1. User opens custom passphrase prompt
+        cb_prompt = {
+            "id": "cb_prompt",
+            "data": "wiz:prompt_pass",
+            "from": {"id": 111},
+            "message": {"message_id": 99, "chat": {"id": 12345}},
+        }
+        await bot.handle_callback_query(cb_prompt)
+        state = bot._get_wizard_state(111)
+        self.assertTrue(state["awaiting_passphrase"])
+
+        # 2. User sends text message with custom passphrase
+        text_msg = {
+            "message_id": 100,
+            "chat": {"id": 12345},
+            "from": {"id": 111},
+            "text": "nauvis-secret-base",
+        }
+        handled = await bot.handle_message(text_msg)
+        self.assertTrue(handled)
+        self.assertFalse(state["awaiting_passphrase"])
+        self.assertEqual(state["passphrase"], "nauvis-secret-base")
+        self.assertTrue(state["is_custom"])
+
+        # 3. User generates invite code with this custom passphrase
+        cb_gen = {
+            "id": "cb_gen",
+            "data": "wiz:g:86400:1",
+            "from": {"id": 111},
+            "message": {"message_id": 99, "chat": {"id": 12345}},
+        }
+        await bot.handle_callback_query(cb_gen)
+
+        # Retrieve created invite from AuthManager
+        devices = auth_mgr.list_devices_and_invites()
+        invites = devices.get("invites", [])
+        self.assertEqual(len(invites), 1)
+
+        # Verify decode with custom passphrase works
+        pkg = await bot.generate_packaged_invite(ttl_seconds=86400, max_uses=1, passphrase="nauvis-secret-base")
+        dec = decode_invite_code(pkg["invite_code"], "nauvis-secret-base")
+        self.assertEqual(dec["ticket"], pkg["ticket"])
+
     def test_invite_wizard_zero_emojis(self):
         """CRITICAL: Verifies invite wizard keyboards and templates contain strictly ZERO emojis."""
-        kb_wiz = TelegramBotService.build_invite_wizard_keyboard(selected_ttl=86400, selected_uses=1)
-        kb_succ = TelegramBotService.build_invite_success_keyboard()
+        kb_wiz = TelegramBotService.build_invite_wizard_keyboard(selected_ttl=86400, selected_uses=1, is_custom=True)
+        kb_succ = TelegramBotService.build_invite_success_keyboard(invite_code="FCT1-TEST")
 
         for kb in (kb_wiz, kb_succ):
             for row in kb.get("inline_keyboard", []):
@@ -489,7 +546,7 @@ class TestTelegramBotServiceAsync(unittest.IsolatedAsyncioTestCase):
                             f"Forbidden emoji detected in wizard button: '{char}' in '{text}'",
                         )
 
-        html_wiz = TelegramBotService.format_invite_wizard_html(86400, 1)
+        html_wiz = TelegramBotService.format_invite_wizard_html(86400, 1, passphrase="secret", is_custom=True)
         for char in html_wiz:
             cp = ord(char)
             self.assertFalse(

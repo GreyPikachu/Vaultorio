@@ -185,6 +185,7 @@ class TelegramBotService:
         self._dashboard_timer_task: Optional[asyncio.Task] = None
         self._is_polling = False
         self._update_offset = 0
+        self._wizard_state: Dict[int, Dict[str, Any]] = {}
 
     @property
     def is_configured(self) -> bool:
@@ -909,9 +910,26 @@ class TelegramBotService:
         else:
             return f"{max_uses} игроков"
 
+    def _get_wizard_state(self, user_id: int) -> Dict[str, Any]:
+        """Returns or creates transient interactive wizard state for a user."""
+        if user_id not in self._wizard_state:
+            self._wizard_state[user_id] = {
+                "ttl_seconds": 86400,
+                "max_uses": 1,
+                "passphrase": str(secrets.randbelow(900000) + 100000),
+                "is_custom": False,
+                "awaiting_passphrase": False,
+                "message_id": None,
+            }
+        return self._wizard_state[user_id]
+
     @staticmethod
-    def build_invite_wizard_keyboard(selected_ttl: int = 86400, selected_uses: int = 1) -> Dict[str, Any]:
-        """Builds interactive inline keyboard for selecting invite expiration and max uses."""
+    def build_invite_wizard_keyboard(
+        selected_ttl: int = 86400,
+        selected_uses: int = 1,
+        is_custom: bool = False,
+    ) -> Dict[str, Any]:
+        """Builds interactive inline keyboard for selecting invite expiration, uses, and passphrase."""
         ttl_row1 = [
             (900, "15 мин"),
             (1800, "30 мин"),
@@ -939,10 +957,17 @@ class TelegramBotService:
             text = f"[• {label}]" if count == selected_uses else label
             return {"text": text, "callback_data": f"wiz:s:{selected_ttl}:{count}"}
 
+        custom_btn_text = "[• Свой пароль]" if is_custom else "Ввести свой пароль"
+        rand_btn_text = "Случайный PIN" if is_custom else "[• Случайный PIN]"
+
         keyboard = [
             [_ttl_btn(sec, lbl) for sec, lbl in ttl_row1],
             [_ttl_btn(sec, lbl) for sec, lbl in ttl_row2],
             [_uses_btn(cnt, lbl) for cnt, lbl in uses_row],
+            [
+                {"text": custom_btn_text, "callback_data": "wiz:prompt_pass"},
+                {"text": rand_btn_text, "callback_data": "wiz:rand_pass"},
+            ],
             [
                 {
                     "text": "Создать Код Дружбы",
@@ -959,22 +984,30 @@ class TelegramBotService:
         return {"inline_keyboard": keyboard}
 
     @classmethod
-    def format_invite_wizard_html(cls, selected_ttl: int = 86400, selected_uses: int = 1) -> str:
+    def format_invite_wizard_html(
+        cls,
+        selected_ttl: int = 86400,
+        selected_uses: int = 1,
+        passphrase: str = "",
+        is_custom: bool = False,
+    ) -> str:
         """Formats interactive invite constructor message in HTML."""
         ttl_str = cls._format_readable_ttl(selected_ttl)
         uses_str = cls._format_readable_uses(selected_uses)
+        pass_mode = "задано вами" if is_custom else "случайный PIN"
 
         return (
             "<b>Конструктор Кода Дружбы (Invite Wizard)</b>\n\n"
             "Текущие параметры кода:\n"
             f"• <b>Срок действия:</b> {html.escape(ttl_str)}\n"
-            f"• <b>Лимит активаций:</b> {html.escape(uses_str)}\n\n"
-            "<i>Выберите срок действия и количество игроков кнопками ниже, затем нажмите кнопку создания:</i>"
+            f"• <b>Лимит игроков:</b> {html.escape(uses_str)}\n"
+            f"• <b>Пароль:</b> <code>{html.escape(passphrase)}</code> ({pass_mode})\n\n"
+            "<i>Выберите параметры кнопками ниже или задайте свой пароль, затем нажмите создание:</i>"
         )
 
     @classmethod
     def format_invite_success_html(cls, invite_info: Dict[str, Any]) -> str:
-        """Formats generated invite code with color syntax highlight and copyable blocks."""
+        """Formats generated invite code with single clean copyable pre block."""
         code = invite_info.get("invite_code", "")
         passphrase = invite_info.get("passphrase", "")
         ttl_sec = invite_info.get("ttl_seconds", 86400)
@@ -986,19 +1019,17 @@ class TelegramBotService:
         exp_dt = datetime.fromtimestamp(expires_at, tz=timezone.utc)
         exp_str = exp_dt.strftime("%Y-%m-%d %H:%M UTC")
 
-        diff_summary = (
-            "+ НОВЫЙ КОД ДРУЖБЫ ДЛЯ ПОДКЛЮЧЕНИЯ\n"
-            f"+ Срок действия : {ttl_str} (до {exp_str})\n"
-            f"+ Лимит игроков : {uses_str}\n"
-            "+ Защита       : PBKDF2-HMAC-SHA256 (FCT1)"
-        )
-
         return (
             "<b>Код Дружбы успешно создан!</b>\n\n"
-            f'<pre><code class="language-diff">\n{diff_summary}\n</code></pre>\n\n'
-            "<b>Код подключения (нажмите для копирования):</b>\n"
-            f"<code>{html.escape(code)}</code>\n\n"
-            "<b>Пароль подключения:</b>\n"
+            "<blockquote>\n"
+            "<b>Параметры доступа к серверу:</b>\n"
+            f"• <b>Срок действия:</b> {html.escape(ttl_str)} (до {exp_str})\n"
+            f"• <b>Лимит игроков:</b> {html.escape(uses_str)}\n"
+            "• <b>Шифрование:</b> PBKDF2-HMAC-SHA256 (FCT1)\n"
+            "</blockquote>\n\n"
+            "<b>Код подключения (нажмите на блок для копирования ключа):</b>\n"
+            f"<pre><code>{html.escape(code)}</code></pre>\n\n"
+            "<b>Секретное слово (пароль подключения):</b>\n"
             f"<code>{html.escape(passphrase)}</code>\n\n"
             "<blockquote>\n"
             "<b>Инструкция для друга:</b>\n"
@@ -1009,16 +1040,16 @@ class TelegramBotService:
         )
 
     @staticmethod
-    def build_invite_success_keyboard() -> Dict[str, Any]:
+    def build_invite_success_keyboard(invite_code: str = "") -> Dict[str, Any]:
         """Builds action keyboard after invite code is generated."""
-        return {
-            "inline_keyboard": [
-                [
-                    {"text": "Создать еще один код", "callback_data": "action:prompt_invite"},
-                    {"text": "Назад в настройки", "callback_data": "menu:main"},
-                ]
-            ]
-        }
+        rows: List[List[Dict[str, Any]]] = []
+        if invite_code:
+            rows.append([{"text": "Скопировать Код Дружбы", "copy_text": {"text": invite_code}}])
+        rows.append([
+            {"text": "Создать еще один код", "callback_data": "action:prompt_invite"},
+            {"text": "Назад в настройки", "callback_data": "menu:main"},
+        ])
+        return {"inline_keyboard": rows}
 
     async def get_public_ip(self) -> str:
         """Resolves server public IPv4 address with caching."""
@@ -1133,17 +1164,17 @@ class TelegramBotService:
 
         logger.debug("Received callback: data='%s', user=%d, msg=%s", cb_data, user_id, msg_id)
 
-        if not self._is_user_authorized(user_id):
-            await self.answer_callback_query(
-                callback_query_id=cb_id,
-                text="У вас нет прав администратора для изменения настроек.",
-                show_alert=True,
-            )
-            return True
-
         if cb_data == "dash:refresh":
             await self.update_dashboard(force=True)
             await self.answer_callback_query(callback_query_id=cb_id, text="Статус обновлен!")
+            return True
+
+        if not self._is_user_authorized(user_id):
+            await self.answer_callback_query(
+                callback_query_id=cb_id,
+                text="У вас нет прав администратора для изменения настроек или создания кодов.",
+                show_alert=True,
+            )
             return True
 
         if cb_data in ("menu:open", "menu:main", "wiz:back"):
@@ -1237,8 +1268,21 @@ class TelegramBotService:
                 )
                 return True
 
-            wizard_text = self.format_invite_wizard_html(selected_ttl=86400, selected_uses=1)
-            wizard_kb = self.build_invite_wizard_keyboard(selected_ttl=86400, selected_uses=1)
+            state = self._get_wizard_state(user_id)
+            if msg_id:
+                state["message_id"] = msg_id
+
+            wizard_text = self.format_invite_wizard_html(
+                selected_ttl=state["ttl_seconds"],
+                selected_uses=state["max_uses"],
+                passphrase=state["passphrase"],
+                is_custom=state["is_custom"],
+            )
+            wizard_kb = self.build_invite_wizard_keyboard(
+                selected_ttl=state["ttl_seconds"],
+                selected_uses=state["max_uses"],
+                is_custom=state["is_custom"],
+            )
             if msg_id and chat_id:
                 await self.edit_message_text(
                     message_id=msg_id,
@@ -1247,26 +1291,36 @@ class TelegramBotService:
                     reply_markup=wizard_kb,
                 )
             else:
-                await self.send_message(
+                sent = await self.send_message(
                     chat_id=chat_id,
                     text=wizard_text,
                     reply_markup=wizard_kb,
                 )
+                if sent and "message_id" in sent:
+                    state["message_id"] = sent["message_id"]
             await self.answer_callback_query(callback_query_id=cb_id)
             return True
 
         if cb_data.startswith("wiz:s:"):
+            state = self._get_wizard_state(user_id)
             parts = cb_data.split(":")
-            ttl = 86400
-            uses = 1
             if len(parts) == 4:
                 try:
-                    ttl = int(parts[2])
-                    uses = int(parts[3])
+                    state["ttl_seconds"] = int(parts[2])
+                    state["max_uses"] = int(parts[3])
                 except ValueError:
                     pass
-            wizard_text = self.format_invite_wizard_html(selected_ttl=ttl, selected_uses=uses)
-            wizard_kb = self.build_invite_wizard_keyboard(selected_ttl=ttl, selected_uses=uses)
+            wizard_text = self.format_invite_wizard_html(
+                selected_ttl=state["ttl_seconds"],
+                selected_uses=state["max_uses"],
+                passphrase=state["passphrase"],
+                is_custom=state["is_custom"],
+            )
+            wizard_kb = self.build_invite_wizard_keyboard(
+                selected_ttl=state["ttl_seconds"],
+                selected_uses=state["max_uses"],
+                is_custom=state["is_custom"],
+            )
             if msg_id and chat_id:
                 await self.edit_message_text(
                     message_id=msg_id,
@@ -1277,10 +1331,90 @@ class TelegramBotService:
             await self.answer_callback_query(callback_query_id=cb_id)
             return True
 
+        if cb_data == "wiz:prompt_pass":
+            state = self._get_wizard_state(user_id)
+            state["awaiting_passphrase"] = True
+            if msg_id:
+                state["message_id"] = msg_id
+
+            prompt_text = (
+                "<b>Ввод секретного слова (пароля подключения)</b>\n\n"
+                "Отправьте желаемый пароль сообщением в этот чат (например: <code>наувис-2026</code> или <code>секрет</code>).\n\n"
+                "<i>Сообщение с паролем будет автоматически удалено из чата сразу после обработки.</i>"
+            )
+            cancel_kb = {
+                "inline_keyboard": [
+                    [{"text": "Отмена / Оставить текущий", "callback_data": "wiz:cancel_pass"}]
+                ]
+            }
+            if msg_id and chat_id:
+                await self.edit_message_text(
+                    message_id=msg_id,
+                    chat_id=chat_id,
+                    text=prompt_text,
+                    reply_markup=cancel_kb,
+                )
+            await self.answer_callback_query(callback_query_id=cb_id)
+            return True
+
+        if cb_data == "wiz:cancel_pass":
+            state = self._get_wizard_state(user_id)
+            state["awaiting_passphrase"] = False
+            wizard_text = self.format_invite_wizard_html(
+                selected_ttl=state["ttl_seconds"],
+                selected_uses=state["max_uses"],
+                passphrase=state["passphrase"],
+                is_custom=state["is_custom"],
+            )
+            wizard_kb = self.build_invite_wizard_keyboard(
+                selected_ttl=state["ttl_seconds"],
+                selected_uses=state["max_uses"],
+                is_custom=state["is_custom"],
+            )
+            if msg_id and chat_id:
+                await self.edit_message_text(
+                    message_id=msg_id,
+                    chat_id=chat_id,
+                    text=wizard_text,
+                    reply_markup=wizard_kb,
+                )
+            await self.answer_callback_query(callback_query_id=cb_id)
+            return True
+
+        if cb_data == "wiz:rand_pass":
+            state = self._get_wizard_state(user_id)
+            state["passphrase"] = str(secrets.randbelow(900000) + 100000)
+            state["is_custom"] = False
+            state["awaiting_passphrase"] = False
+            wizard_text = self.format_invite_wizard_html(
+                selected_ttl=state["ttl_seconds"],
+                selected_uses=state["max_uses"],
+                passphrase=state["passphrase"],
+                is_custom=False,
+            )
+            wizard_kb = self.build_invite_wizard_keyboard(
+                selected_ttl=state["ttl_seconds"],
+                selected_uses=state["max_uses"],
+                is_custom=False,
+            )
+            if msg_id and chat_id:
+                await self.edit_message_text(
+                    message_id=msg_id,
+                    chat_id=chat_id,
+                    text=wizard_text,
+                    reply_markup=wizard_kb,
+                )
+            await self.answer_callback_query(
+                callback_query_id=cb_id,
+                text=f"Сгенерирован PIN: {state['passphrase']}",
+            )
+            return True
+
         if cb_data.startswith("wiz:g:"):
+            state = self._get_wizard_state(user_id)
             parts = cb_data.split(":")
-            ttl = 86400
-            uses = 1
+            ttl = state["ttl_seconds"]
+            uses = state["max_uses"]
             if len(parts) == 4:
                 try:
                     ttl = int(parts[2])
@@ -1297,9 +1431,13 @@ class TelegramBotService:
                 return True
 
             try:
-                invite_info = await self.generate_packaged_invite(ttl_seconds=ttl, max_uses=uses)
+                invite_info = await self.generate_packaged_invite(
+                    ttl_seconds=ttl,
+                    max_uses=uses,
+                    passphrase=state.get("passphrase"),
+                )
                 res_text = self.format_invite_success_html(invite_info)
-                res_kb = self.build_invite_success_keyboard()
+                res_kb = self.build_invite_success_keyboard(invite_code=invite_info["invite_code"])
                 if msg_id and chat_id:
                     await self.edit_message_text(
                         message_id=msg_id,
@@ -1369,6 +1507,49 @@ class TelegramBotService:
         if not text or not chat_id:
             return False
 
+        # Check if user is entering a custom passphrase in the invite wizard
+        state = self._wizard_state.get(user_id)
+        if state and state.get("awaiting_passphrase"):
+            clean_pass = text.strip()
+            if clean_pass.startswith("/"):
+                state["awaiting_passphrase"] = False
+            else:
+                state["passphrase"] = clean_pass
+                state["is_custom"] = True
+                state["awaiting_passphrase"] = False
+
+                if msg_id and chat_id:
+                    await self.delete_message(message_id=msg_id, chat_id=chat_id)
+
+                wizard_text = self.format_invite_wizard_html(
+                    selected_ttl=state["ttl_seconds"],
+                    selected_uses=state["max_uses"],
+                    passphrase=state["passphrase"],
+                    is_custom=True,
+                )
+                wizard_kb = self.build_invite_wizard_keyboard(
+                    selected_ttl=state["ttl_seconds"],
+                    selected_uses=state["max_uses"],
+                    is_custom=True,
+                )
+                wiz_msg_id = state.get("message_id")
+                if wiz_msg_id and chat_id:
+                    await self.edit_message_text(
+                        message_id=wiz_msg_id,
+                        chat_id=chat_id,
+                        text=wizard_text,
+                        reply_markup=wizard_kb,
+                    )
+                else:
+                    sent = await self.send_message(
+                        chat_id=chat_id,
+                        text=wizard_text,
+                        reply_markup=wizard_kb,
+                    )
+                    if sent and "message_id" in sent:
+                        state["message_id"] = sent["message_id"]
+                return True
+
         if not text.startswith("/"):
             return False
 
@@ -1380,6 +1561,12 @@ class TelegramBotService:
         logger.info("Routing bot command: '%s', user=%d, chat=%s", cmd, user_id, chat_id)
 
         if cmd in ("/start", "/setup"):
+            # Auto-claim owner if no admin is set yet
+            if not self.settings.admin_user_ids and user_id:
+                self.settings.admin_user_ids.append(user_id)
+                self.save_settings()
+                logger.info("Auto-registered user %d as primary bot administrator.", user_id)
+
             # Bind chat_id to current chat if not bound or explicitly requested via /setup
             if not self.settings.chat_id or cmd == "/setup":
                 self.settings.chat_id = chat_id
@@ -1398,6 +1585,12 @@ class TelegramBotService:
             return True
 
         if cmd == "/settings":
+            if not self._is_user_authorized(user_id):
+                await self.send_message(
+                    chat_id=chat_id,
+                    text="У вас нет прав администратора. Меню настроек доступно только владельцу.",
+                )
+                return True
             menu_text = self.format_settings_menu_html()
             menu_kb = self.build_settings_keyboard()
             await self.send_message(chat_id=chat_id, text=menu_text, reply_markup=menu_kb)
@@ -1410,15 +1603,34 @@ class TelegramBotService:
 
         if cmd == "/invite":
             if not self._is_user_authorized(user_id):
-                await self.send_message(chat_id=chat_id, text="У вас нет прав для создания кодов.")
+                await self.send_message(
+                    chat_id=chat_id,
+                    text="У вас нет прав администратора. Создавать Коды Дружбы может только владелец.",
+                )
                 return True
             if not self.auth_manager:
                 await self.send_message(chat_id=chat_id, text="Менеджер авторизации не подключен.")
                 return True
 
-            wizard_text = self.format_invite_wizard_html(selected_ttl=86400, selected_uses=1)
-            wizard_kb = self.build_invite_wizard_keyboard(selected_ttl=86400, selected_uses=1)
-            await self.send_message(chat_id=chat_id, text=wizard_text, reply_markup=wizard_kb)
+            state = self._get_wizard_state(user_id)
+            if args:
+                state["passphrase"] = args
+                state["is_custom"] = True
+
+            wizard_text = self.format_invite_wizard_html(
+                selected_ttl=state["ttl_seconds"],
+                selected_uses=state["max_uses"],
+                passphrase=state["passphrase"],
+                is_custom=state["is_custom"],
+            )
+            wizard_kb = self.build_invite_wizard_keyboard(
+                selected_ttl=state["ttl_seconds"],
+                selected_uses=state["max_uses"],
+                is_custom=state["is_custom"],
+            )
+            sent = await self.send_message(chat_id=chat_id, text=wizard_text, reply_markup=wizard_kb)
+            if sent and "message_id" in sent:
+                state["message_id"] = sent["message_id"]
             return True
 
         if cmd == "/set_key":
