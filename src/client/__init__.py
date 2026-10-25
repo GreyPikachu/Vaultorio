@@ -28,7 +28,9 @@ from src.client.p2p_tunnel import (
     HostP2PBridge,
     decode_control_packet,
     encode_control_packet,
+    encode_relay_packet,
     format_data_packet,
+    is_control_packet,
     parse_data_packet,
 )
 from src.client.session_orchestrator import (
@@ -58,10 +60,12 @@ __all__ = [
     "copy_to_clipboard",
     "decode_control_packet",
     "encode_control_packet",
+    "encode_relay_packet",
     "ensure_chronicle_mod_installed",
     "find_latest_session_save",
     "flush_final_save_on_exit",
     "format_data_packet",
+    "is_control_packet",
     "main",
     "parse_data_packet",
     "run_first_time_setup_gui",

@@ -171,6 +171,16 @@ def decode_control_packet(data: bytes) -> Dict[str, Any] | None:
     return None
 
 
+def is_control_packet(data: bytes) -> bool:
+    """Проверяет, является ли датаграмма управляющим пакетом (сигнатура HEADER_CONTROL)."""
+    return len(data) >= len(HEADER_CONTROL) and data.startswith(HEADER_CONTROL)
+
+
+def encode_relay_packet(guest_id: str, payload: bytes) -> bytes:
+    """Оборачивает полезную нагрузку в пакет релея (HEADER_RELAY + guest_id + payload)."""
+    return format_data_packet(guest_id, payload, is_relay=True)
+
+
 def format_data_packet(guest_id: str, payload: bytes, is_relay: bool = False) -> bytes:
     """Формирует игровой пакет данных Factorio.
 
@@ -221,6 +231,7 @@ class ConnectedGuestState:
     last_punch_sent: float = 0.0
     last_direct_time: float = 0.0
     local_factorio_sock: socket.socket | None = None
+    rtt_ms: Optional[float] = None
 
 
 class HostP2PBridge:
@@ -289,7 +300,32 @@ class HostP2PBridge:
                 "is_relay_active": g.is_relay_active,
                 "active_endpoint": g.active_endpoint,
                 "last_seen_ago": round(time.time() - g.last_seen, 2),
+                "rtt_ms": round(g.rtt_ms, 1) if g.rtt_ms is not None else None,
             }
+
+    def get_guests_metrics(self, stale_timeout_sec: float = 15.0) -> List[Dict[str, Any]]:
+        """Возвращает метрики активных гостей (RTT и режим соединения P2P/Relay).
+
+        Фильтрует неактивных гостей, у которых time.time() - last_seen > stale_timeout_sec.
+        Сортирует список по имени гостя для детерминированного порядка.
+        """
+        now = time.time()
+        metrics: List[Dict[str, Any]] = []
+
+        with self._lock:
+            for guest in self._guests.values():
+                if (now - guest.last_seen) <= stale_timeout_sec:
+                    ping_val = round(guest.rtt_ms, 1) if guest.rtt_ms is not None else None
+                    metrics.append({
+                        "name": guest.guest_name or guest.guest_id,
+                        "guest_id": guest.guest_id,
+                        "ping_ms": ping_val,
+                        "direct_p2p": bool(guest.is_direct_p2p),
+                        "mode": "P2P" if guest.is_direct_p2p else "Relay",
+                    })
+
+        metrics.sort(key=lambda m: str(m.get("name", "")).lower())
+        return metrics
 
     def start(self) -> None:
         """Запускает сокет Хоста и рабочий поток обработки сетевых пакетов."""
@@ -450,12 +486,7 @@ class HostP2PBridge:
                 self._handle_punch_ack(ctrl, addr)
 
             elif cmd == "P2P_KEEPALIVE":
-                guest_id = str(ctrl.get("guest_id", ""))
-                with self._lock:
-                    if guest_id in self._guests:
-                        now_ts = time.time()
-                        self._guests[guest_id].last_seen = now_ts
-                        self._guests[guest_id].last_direct_time = now_ts
+                self._handle_p2p_keepalive(ctrl, addr, via_relay=False)
 
         # Б. Пакет игровых данных (Direct или Relay)
         elif data.startswith(HEADER_DATA) or data.startswith(HEADER_RELAY):
@@ -463,7 +494,90 @@ class HostP2PBridge:
             if not parsed:
                 return
             guest_id, raw_payload, is_relay = parsed
+
+            # Перехват управляющих пакетов внутри туннеля (никогда не пересылать в Factorio)
+            if is_control_packet(raw_payload):
+                inner_ctrl = decode_control_packet(raw_payload)
+                if inner_ctrl:
+                    inner_cmd = inner_ctrl.get("cmd")
+                    if inner_cmd == "P2P_KEEPALIVE":
+                        self._handle_p2p_keepalive(inner_ctrl, addr, via_relay=True, relay_guest_id=guest_id)
+                        return
+                    elif inner_cmd == "PUNCH_SYN":
+                        self._handle_punch_syn(inner_ctrl, addr)
+                        return
+                    elif inner_cmd == "PUNCH_ACK":
+                        self._handle_punch_ack(inner_ctrl, addr)
+                        return
+                return
+
             self._route_game_data_to_factorio(guest_id, raw_payload, is_relay, addr)
+
+    def _handle_p2p_keepalive(
+        self,
+        ctrl: Dict[str, Any],
+        addr: Tuple[str, int],
+        via_relay: bool = False,
+        relay_guest_id: str = "",
+    ) -> None:
+        """Обрабатывает P2P_KEEPALIVE от Гостя, сохраняет ping_M и отправляет P2P_KEEPALIVE_ACK."""
+        guest_id = str(ctrl.get("guest_id") or relay_guest_id).strip()
+        if not guest_id:
+            return
+
+        now_ts = time.time()
+        guest_name = str(ctrl.get("guest_name") or "")
+        ping_m = ctrl.get("ping_M")
+
+        is_from_stun = (addr[0] == self.stun_host and addr[1] == self.stun_port)
+        is_relay_packet = via_relay or is_from_stun
+
+        with self._lock:
+            if guest_id in self._guests:
+                guest = self._guests[guest_id]
+                if guest_name:
+                    guest.guest_name = guest_name
+            else:
+                guest = ConnectedGuestState(
+                    guest_id=guest_id,
+                    guest_name=guest_name or guest_id,
+                )
+                self._guests[guest_id] = guest
+
+            guest.last_seen = now_ts
+
+            if is_relay_packet:
+                # Если прямой P2P уже активен и недавно подтвержден (< 5 сек), не сбрасываем
+                if not guest.is_direct_p2p or (now_ts - guest.last_direct_time > 5.0):
+                    guest.is_direct_p2p = False
+                    guest.is_relay_active = True
+                    guest.active_endpoint = None
+            else:
+                guest.is_direct_p2p = True
+                guest.is_relay_active = False
+                guest.active_endpoint = addr
+                guest.last_direct_time = now_ts
+
+            if isinstance(ping_m, (int, float)) and 0.0 <= float(ping_m) <= 9999.0:
+                guest.rtt_ms = round(float(ping_m), 1)
+
+        # Отправляем ответ P2P_KEEPALIVE_ACK
+        if self._s_host:
+            echo_ts = ctrl.get("ts")
+            ack_payload = {
+                "cmd": "P2P_KEEPALIVE_ACK",
+                "guest_id": guest_id,
+                "echo_ts": echo_ts,
+            }
+            ack_bytes = encode_control_packet(ack_payload)
+            try:
+                if is_relay_packet:
+                    relay_ack_bytes = format_data_packet(guest_id, ack_bytes, is_relay=True)
+                    self._s_host.sendto(relay_ack_bytes, (self.stun_host, self.stun_port))
+                else:
+                    self._s_host.sendto(ack_bytes, addr)
+            except Exception as err:
+                logger.debug(f"Ошибка отправки P2P_KEEPALIVE_ACK для {guest_id}: {err}")
 
     def _handle_peer_match(self, payload: Dict[str, Any]) -> None:
         """Обрабатывает PEER_MATCH от STUN-координатора."""
@@ -893,10 +1007,10 @@ class GuestP2PProxy:
                     punch_interval = 0.2 if not self.is_relay_active else 1.0
                     if now - self._last_punch_sent >= punch_interval:
                         self._send_punch_syn(now)
-                else:
-                    # Прямой канал установлен: посылаем keepalive каждые 3 сек для удержания NAT-трансляции
-                    if now - self._last_keepalive >= 3.0:
-                        self._send_keepalive()
+
+                # Keepalive отправляется каждые 3 сек как в режиме прямого P2P, так и при Relay
+                if (self.is_direct_p2p or self.is_relay_active) and (now - self._last_keepalive >= 3.0):
+                    self._send_keepalive(now)
 
             with self._lock:
                 if not self._l_proxy or not self._s_guest:
@@ -936,20 +1050,37 @@ class GuestP2PProxy:
                 pass
         self._last_punch_sent = now
 
-    def _send_keepalive(self) -> None:
-        """Шлёт keepalive-пакет Хосту для поддержания NAT-записи."""
-        if not self._s_guest or not self._host_active_endpoint:
+    def _send_keepalive(self, now: float | None = None) -> None:
+        """Шлёт keepalive-пакет Хосту (напрямую или через релей) для поддержания NAT и замера RTT."""
+        if not self._s_guest:
             return
+        if now is None:
+            now = time.time()
+
+        with self._lock:
+            current_rtt = round(self._rtt_ms, 1) if self._rtt_ms is not None else None
+
         pkt = encode_control_packet({
             "cmd": "P2P_KEEPALIVE",
             "sender_role": "guest",
             "guest_id": self.guest_id,
+            "guest_name": self.guest_name,
+            "ts": now,
+            "ping_M": current_rtt,
         })
+
         try:
-            self._s_guest.sendto(pkt, self._host_active_endpoint)
-            self._last_keepalive = time.time()
-        except Exception:
-            pass
+            # Если активен прямой P2P-канал
+            if self.is_direct_p2p and self._host_active_endpoint:
+                self._s_guest.sendto(pkt, self._host_active_endpoint)
+                self._last_keepalive = now
+            # Если активен Relay
+            elif self.is_relay_active:
+                relay_pkt = format_data_packet(self.guest_id, pkt, is_relay=True)
+                self._s_guest.sendto(relay_pkt, (self.stun_host, self.stun_port))
+                self._last_keepalive = now
+        except Exception as err:
+            logger.debug(f"Ошибка отправки P2P_KEEPALIVE: {err}")
 
     def _handle_local_factorio_read(self) -> None:
         """Читает дату от локальной Factorio (127.0.0.1:34198) и пересылает Хосту."""
@@ -1011,6 +1142,9 @@ class GuestP2PProxy:
             elif cmd == "PUNCH_ACK":
                 self._handle_punch_ack(ctrl, addr)
 
+            elif cmd == "P2P_KEEPALIVE_ACK":
+                self._handle_keepalive_ack(ctrl)
+
         # Б. Игровой пакет данных
         elif data.startswith(HEADER_DATA) or data.startswith(HEADER_RELAY):
             parsed = parse_data_packet(data)
@@ -1018,6 +1152,19 @@ class GuestP2PProxy:
                 return
             guest_id, raw_payload, is_relay = parsed
             now = time.time()
+
+            # Перехват управляющих пакетов внутри туннеля (никогда не пересылать в Factorio)
+            if is_control_packet(raw_payload):
+                inner_ctrl = decode_control_packet(raw_payload)
+                if inner_ctrl:
+                    inner_cmd = inner_ctrl.get("cmd")
+                    if inner_cmd == "P2P_KEEPALIVE_ACK":
+                        self._handle_keepalive_ack(inner_ctrl)
+                        return
+                    elif inner_cmd == "PUNCH_ACK":
+                        self._handle_punch_ack(inner_ctrl, addr)
+                        return
+                return
 
             # Обновляем состояние канала
             with self._lock:
@@ -1087,15 +1234,44 @@ class GuestP2PProxy:
         """Подтверждает установление прямого P2P-канала при получении PUNCH_ACK от Хоста."""
         syn_ts = payload.get("ts", 0)
         now = time.time()
-        rtt = round((now - syn_ts) * 1000.0, 2) if syn_ts else None
+        rtt: float | None = None
+        if isinstance(syn_ts, (int, float)) and syn_ts > 0:
+            raw_rtt = (now - float(syn_ts)) * 1000.0
+            if 0.05 <= raw_rtt <= 9999.0:
+                rtt = round(raw_rtt, 1)
 
         with self._lock:
             self._host_active_endpoint = addr
             self._is_connected = True
             self._is_direct_p2p = True
             self._is_relay_active = False
-            self._rtt_ms = rtt
+            if rtt is not None:
+                if self._rtt_ms is None:
+                    self._rtt_ms = rtt
+                else:
+                    self._rtt_ms = round(0.7 * self._rtt_ms + 0.3 * rtt, 1)
             self._last_direct_p2p_time = now
             self._last_incoming_packet_time = now
 
-        logger.info(f"Прямой P2P-туннель с Хостом установлен! Адрес: {addr}, Пинг: {rtt} мс")
+        logger.info(f"Прямой P2P-туннель с Хостом установлен! Адрес: {addr}, Пинг: {self._rtt_ms} мс")
+
+    def _handle_keepalive_ack(self, payload: Dict[str, Any]) -> None:
+        """Обрабатывает P2P_KEEPALIVE_ACK от Хоста, вычисляет RTT по локальным часам и применяет EMA."""
+        echo_ts = payload.get("echo_ts")
+        if not isinstance(echo_ts, (int, float)):
+            return
+
+        now = time.time()
+        raw_rtt = (now - float(echo_ts)) * 1000.0
+
+        # Фильтр аномалий (NTP-скачки, подвисание ОС, отрицательный RTT)
+        if 0.05 <= raw_rtt <= 9999.0:
+            with self._lock:
+                if self._rtt_ms is None:
+                    self._rtt_ms = round(raw_rtt, 1)
+                else:
+                    smoothed = 0.7 * self._rtt_ms + 0.3 * raw_rtt
+                    self._rtt_ms = round(smoothed, 1)
+            logger.debug(f"GuestP2PProxy: RTT={raw_rtt:.1f} мс, EMA RTT={self._rtt_ms} мс")
+        else:
+            logger.debug(f"GuestP2PProxy: отброшено аномальное значение RTT={raw_rtt:.1f} мс")

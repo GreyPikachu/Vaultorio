@@ -664,6 +664,7 @@ class SessionOrchestrator:
                         mod_list=self.env.get_active_mods_manifest(),
                         target_save_name=self.env.cloud_save_name,
                         script_output_dir=self.env.script_output_dir,
+                        guests_metrics_getter=self.host_bridge.get_guests_metrics,
                     )
                     self.host_workers.start()
 

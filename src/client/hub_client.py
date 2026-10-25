@@ -327,11 +327,14 @@ class HubClient:
         self,
         session_token: str,
         udp_port: Optional[int] = None,
+        guests_metrics: Optional[list[dict[str, Any]]] = None,
     ) -> dict[str, Any]:
         """Продлевает аренду слота Хоста во время активной игры (каждые 30 сек)."""
         payload: dict[str, Any] = {"session_token": session_token}
         if udp_port is not None:
             payload["udp_port"] = udp_port
+        if guests_metrics is not None:
+            payload["guests_metrics"] = guests_metrics
 
         try:
             resp = self._client.post("/heartbeat", json=payload)

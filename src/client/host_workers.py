@@ -384,6 +384,7 @@ class HeartbeatWorker:
         interval_sec: float = 30.0,
         is_confirmed_getter: Callable[[], bool] | None = None,
         udp_port: int | None = None,
+        guests_metrics_getter: Callable[[], list[dict]] | None = None,
     ) -> None:
         if not session_token:
             raise ValueError("session_token не может быть пустым")
@@ -393,6 +394,7 @@ class HeartbeatWorker:
         self.interval_sec = max(0.01, float(interval_sec))
         self.is_confirmed_getter = is_confirmed_getter
         self.udp_port = udp_port
+        self.guests_metrics_getter = guests_metrics_getter
 
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
@@ -403,8 +405,25 @@ class HeartbeatWorker:
             logger.debug("Heartbeat пропущен: хостинг еще не подтвержден")
             return None
 
+        guests_metrics = None
+        if self.guests_metrics_getter is not None:
+            try:
+                guests_metrics = self.guests_metrics_getter()
+            except Exception as e:
+                logger.debug(f"Не удалось получить метрики гостей для heartbeat: {e}")
+                guests_metrics = None
+
+        hb_kwargs: dict = {}
+        if self.udp_port is not None:
+            hb_kwargs["udp_port"] = self.udp_port
+        if guests_metrics is not None:
+            hb_kwargs["guests_metrics"] = guests_metrics
+
         try:
-            resp = self.hub_client.send_heartbeat(self.session_token, udp_port=self.udp_port)
+            resp = self.hub_client.send_heartbeat(
+                self.session_token,
+                **hb_kwargs,
+            )
             logger.debug(f"Heartbeat успешно отправлен: {resp}")
             return resp
         except Exception as err:
@@ -725,6 +744,7 @@ class HostWorkersManager:
         target_save_name: str = "cloud_world.zip",
         on_non_cloud_game: Callable[[str], None] | None = None,
         script_output_dir: Path | str | None = None,
+        guests_metrics_getter: Callable[[], list[dict]] | None = None,
     ) -> None:
         self.log_path = Path(log_path)
         self.saves_dir = Path(saves_dir)
@@ -736,6 +756,7 @@ class HostWorkersManager:
         self.mod_list = mod_list
         self.target_save_name = str(target_save_name or "cloud_world.zip")
         self.user_on_non_cloud_game = on_non_cloud_game
+        self.guests_metrics_getter = guests_metrics_getter
 
         def _handle_non_cloud(map_name: str) -> None:
             logger.info(
@@ -779,6 +800,7 @@ class HostWorkersManager:
             interval_sec=heartbeat_interval_sec,
             is_confirmed_getter=lambda: self.detector.is_confirmed and not self.detector.is_non_cloud_game,
             udp_port=self.factorio_port,
+            guests_metrics_getter=self.guests_metrics_getter,
         )
 
         self.autosave_watcher = AutosaveWatcher(
