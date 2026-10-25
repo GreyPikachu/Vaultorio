@@ -313,11 +313,11 @@ class TestSettingsMenuKeyboardAndTimezoneInteraction(unittest.IsolatedAsyncioTes
         self.tmp_dir.cleanup()
 
     def test_settings_keyboard_buttons_content(self):
-        """Verifies 'Время обновления' and 'Пояс: ...' buttons exist in build_settings_keyboard."""
+        """Verifies 'Время обновления' and 'Пояс: ...' buttons exist in build_settings_keyboard(subpage='dashboard')."""
         self.bot.settings.show_updated_time = True
         self.bot.settings.dashboard_tz_offset = 3
 
-        kb = self.bot.build_settings_keyboard()
+        kb = self.bot.build_settings_keyboard(subpage="dashboard")
         buttons = [btn for row in kb["inline_keyboard"] for btn in row]
         btn_map = {b["callback_data"]: b["text"] for b in buttons}
 
@@ -330,7 +330,7 @@ class TestSettingsMenuKeyboardAndTimezoneInteraction(unittest.IsolatedAsyncioTes
         # Switch show_updated_time to False
         self.bot.settings.show_updated_time = False
         self.bot.settings.dashboard_tz_offset = 0
-        kb2 = self.bot.build_settings_keyboard()
+        kb2 = self.bot.build_settings_keyboard(subpage="dashboard")
         btn_map2 = {b["callback_data"]: b["text"] for row in kb2["inline_keyboard"] for b in row}
         self.assertEqual(btn_map2["toggle:show_updated_time"], "Время обновления: [ВЫКЛ]")
         self.assertEqual(btn_map2["cycle:dashboard_tz_offset"], "Пояс: UTC (0)")

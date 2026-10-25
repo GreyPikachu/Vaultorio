@@ -993,17 +993,47 @@ class TelegramBotService:
     # Interactive Settings Menu
     # --------------------------------------------------------------------------
 
-    def format_settings_menu_html(self) -> str:
-        """Formats the settings menu overview text."""
+    @staticmethod
+    def get_setting_subpage(field_name: str) -> str:
+        """Determines which settings submenu a setting belongs to."""
+        if field_name.startswith("notify_") or field_name == "silent_notifications":
+            return "notifications"
+        if field_name in (
+            "live_dashboard_enabled",
+            "show_ping_in_dashboard",
+            "show_updated_time",
+            "dashboard_tz_offset",
+        ):
+            return "dashboard"
+        if field_name in ("ai_chronicle_enabled", "ai_schedule_mode", "ai_persona_style"):
+            return "chronicle"
+        return "main"
+
+    def format_settings_menu_html(self, subpage: str = "main") -> str:
+        """Formats the settings menu overview or submenu text."""
+        if subpage == "notifications":
+            return (
+                "<b>Настройки уведомлений</b>\n\n"
+                "Выберите, о каких игровых событиях бот должен присылать оповещения в чат:"
+            )
+        if subpage == "dashboard":
+            return (
+                "<b>Настройки закрепленного дашборда</b>\n\n"
+                "Управление живым закрепленным статусом сервера и отображаемыми данными:"
+            )
+        if subpage == "chronicle":
+            return (
+                "<b>Настройки ИИ-хроники Наувиса</b>\n\n"
+                "Параметры генерации иллюстрированных новостей и отчетов нейросетью:"
+            )
         return (
             "<b>Настройки Telegram-бота Factorio</b>\n\n"
-            "Управляйте уведомлениями, закрепленным дашбордом и ИИ-хроникой:\n"
-            "Нажимайте кнопки ниже для переключения параметров."
+            "Выберите категорию для настройки параметров:"
         )
 
-    def build_settings_keyboard(self) -> Dict[str, Any]:
+    def build_settings_keyboard(self, subpage: str = "main") -> Dict[str, Any]:
         """
-        Constructs the interactive settings menu inline keyboard.
+        Constructs the interactive settings menu inline keyboard for the specified subpage.
         Strictly zero emojis.
         """
         def toggle_label(name: str, state: bool) -> str:
@@ -1019,87 +1049,115 @@ class TelegramBotService:
             format_tz_label(self.settings.dashboard_tz_offset),
         )
 
-        keyboard: List[List[Dict[str, str]]] = [
-            # Notification forwarding toggles
+        if subpage == "notifications":
+            keyboard = [
+                [
+                    {
+                        "text": toggle_label("Хост старт", self.settings.notify_host_start),
+                        "callback_data": "toggle:notify_host_start",
+                    },
+                    {
+                        "text": toggle_label("Финал сессии", self.settings.notify_session_end),
+                        "callback_data": "toggle:notify_session_end",
+                    },
+                ],
+                [
+                    {
+                        "text": toggle_label("Гость вошел", self.settings.notify_guest_join),
+                        "callback_data": "toggle:notify_guest_join",
+                    },
+                    {
+                        "text": toggle_label("Гость вышел", self.settings.notify_guest_leave),
+                        "callback_data": "toggle:notify_guest_leave",
+                    },
+                ],
+                [
+                    {
+                        "text": toggle_label("Автосейвы", self.settings.notify_rolling_save),
+                        "callback_data": "toggle:notify_rolling_save",
+                    },
+                    {
+                        "text": toggle_label("Без звука", self.settings.silent_notifications),
+                        "callback_data": "toggle:silent_notifications",
+                    },
+                ],
+                [
+                    {"text": "« Назад", "callback_data": "menu:main"},
+                ],
+            ]
+            return {"inline_keyboard": keyboard}
+
+        if subpage == "dashboard":
+            keyboard = [
+                [
+                    {
+                        "text": toggle_label("Живой дашборд", self.settings.live_dashboard_enabled),
+                        "callback_data": "toggle:live_dashboard_enabled",
+                    },
+                ],
+                [
+                    {
+                        "text": toggle_label("Пинг в закрепе", self.settings.show_ping_in_dashboard),
+                        "callback_data": "toggle:show_ping_in_dashboard",
+                    },
+                ],
+                [
+                    {
+                        "text": toggle_label("Время обновления", self.settings.show_updated_time),
+                        "callback_data": "toggle:show_updated_time",
+                    },
+                    {
+                        "text": f"Пояс: {curr_tz_label}",
+                        "callback_data": "cycle:dashboard_tz_offset",
+                    },
+                ],
+                [
+                    {"text": "Пересоздать закреп", "callback_data": "action:repin"},
+                    {"text": "Изменить заголовок", "callback_data": "action:prompt_title"},
+                ],
+                [
+                    {"text": "« Назад", "callback_data": "menu:main"},
+                ],
+            ]
+            return {"inline_keyboard": keyboard}
+
+        if subpage == "chronicle":
+            keyboard = [
+                [
+                    {
+                        "text": toggle_label("ИИ-хроника", self.settings.ai_chronicle_enabled),
+                        "callback_data": "toggle:ai_chronicle_enabled",
+                    },
+                ],
+                [
+                    {
+                        "text": f"Частота: {curr_sched}",
+                        "callback_data": "cycle:ai_schedule_mode",
+                    },
+                    {
+                        "text": f"Стиль: {curr_style}",
+                        "callback_data": "cycle:ai_persona_style",
+                    },
+                ],
+                [
+                    {"text": "Задать ключ OpenRouter", "callback_data": "action:prompt_openrouter_key"},
+                ],
+                [
+                    {"text": "« Назад", "callback_data": "menu:main"},
+                ],
+            ]
+            return {"inline_keyboard": keyboard}
+
+        # Main Settings Menu (subpage == "main")
+        admin_count = len(self.settings.admin_user_ids)
+        keyboard = [
             [
-                {
-                    "text": toggle_label("Хост старт", self.settings.notify_host_start),
-                    "callback_data": "toggle:notify_host_start",
-                },
-                {
-                    "text": toggle_label("Гость вошел", self.settings.notify_guest_join),
-                    "callback_data": "toggle:notify_guest_join",
-                },
+                {"text": "Уведомления", "callback_data": "menu:notifications"},
+                {"text": "Закрепленный дашборд", "callback_data": "menu:dashboard"},
             ],
             [
-                {
-                    "text": toggle_label("Гость вышел", self.settings.notify_guest_leave),
-                    "callback_data": "toggle:notify_guest_leave",
-                },
-                {
-                    "text": toggle_label("Автосейвы", self.settings.notify_rolling_save),
-                    "callback_data": "toggle:notify_rolling_save",
-                },
-            ],
-            [
-                {
-                    "text": toggle_label("Финал сессии", self.settings.notify_session_end),
-                    "callback_data": "toggle:notify_session_end",
-                },
-                {
-                    "text": toggle_label("Без звука", self.settings.silent_notifications),
-                    "callback_data": "toggle:silent_notifications",
-                },
-            ],
-            [
-                {
-                    "text": toggle_label("Живой дашборд", self.settings.live_dashboard_enabled),
-                    "callback_data": "toggle:live_dashboard_enabled",
-                },
-            ],
-            [
-                {
-                    "text": toggle_label("Пинг в закрепе", self.settings.show_ping_in_dashboard),
-                    "callback_data": "toggle:show_ping_in_dashboard",
-                },
-            ],
-            [
-                {
-                    "text": toggle_label("Время обновления", self.settings.show_updated_time),
-                    "callback_data": "toggle:show_updated_time",
-                },
-                {
-                    "text": f"Пояс: {curr_tz_label}",
-                    "callback_data": "cycle:dashboard_tz_offset",
-                },
-            ],
-            # AI Chronicle settings
-            [
-                {
-                    "text": toggle_label("ИИ-хроника", self.settings.ai_chronicle_enabled),
-                    "callback_data": "toggle:ai_chronicle_enabled",
-                },
-            ],
-            [
-                {
-                    "text": f"Частота ИИ: {curr_sched}",
-                    "callback_data": "cycle:ai_schedule_mode",
-                },
-            ],
-            [
-                {
-                    "text": f"Стиль ИИ: {curr_style}",
-                    "callback_data": "cycle:ai_persona_style",
-                },
-            ],
-            # Actions
-            [
-                {"text": "Задать ключ OpenRouter", "callback_data": "action:prompt_openrouter_key"},
-                {"text": "Изменить заголовок", "callback_data": "action:prompt_title"},
-            ],
-            [
-                {"text": f"Администраторы ({len(self.settings.admin_user_ids)})", "callback_data": "action:admin_list"},
-                {"text": "Пересоздать закреп", "callback_data": "action:repin"},
+                {"text": "ИИ-Хроника", "callback_data": "menu:chronicle"},
+                {"text": f"Администраторы ({admin_count})", "callback_data": "action:admin_list"},
             ],
             [
                 {"text": "Миры в сейфе / Архив", "callback_data": "menu:worlds"},
@@ -1109,7 +1167,6 @@ class TelegramBotService:
                 {"text": "Закрыть меню", "callback_data": "menu:close"},
             ],
         ]
-
         return {"inline_keyboard": keyboard}
 
     def format_worlds_menu_html(self) -> str:
@@ -1541,9 +1598,9 @@ class TelegramBotService:
             return True
 
         if cb_data in ("menu:open", "menu:main", "wiz:back"):
-            menu_text = self.format_settings_menu_html()
-            menu_kb = self.build_settings_keyboard()
-            if cb_data in ("menu:main", "wiz:back") and msg_id and chat_id:
+            menu_text = self.format_settings_menu_html(subpage="main")
+            menu_kb = self.build_settings_keyboard(subpage="main")
+            if cb_data in ("menu:main", "wiz:back") and msg_id and chat_id and msg_id != self.settings.pinned_message_id:
                 await self.edit_message_text(
                     message_id=msg_id,
                     chat_id=chat_id,
@@ -1552,6 +1609,22 @@ class TelegramBotService:
                 )
             else:
                 await self.send_message(text=menu_text, chat_id=chat_id, reply_markup=menu_kb)
+            await self.answer_callback_query(callback_query_id=cb_id)
+            return True
+
+        if cb_data in ("menu:notifications", "menu:dashboard", "menu:chronicle"):
+            subpage = cb_data.split(":", 1)[1]
+            sub_text = self.format_settings_menu_html(subpage=subpage)
+            sub_kb = self.build_settings_keyboard(subpage=subpage)
+            if msg_id and chat_id and msg_id != self.settings.pinned_message_id:
+                await self.edit_message_text(
+                    message_id=msg_id,
+                    chat_id=chat_id,
+                    text=sub_text,
+                    reply_markup=sub_kb,
+                )
+            else:
+                await self.send_message(text=sub_text, chat_id=chat_id, reply_markup=sub_kb)
             await self.answer_callback_query(callback_query_id=cb_id)
             return True
 
@@ -1697,13 +1770,14 @@ class TelegramBotService:
                     setattr(self.settings, field_name, new_val)
                     self.save_settings()
 
-                    # Refresh menu inline keyboard
-                    if msg_id and chat_id:
+                    # Refresh menu inline keyboard keeping user in the respective submenu
+                    subpage = self.get_setting_subpage(field_name)
+                    if msg_id and chat_id and msg_id != self.settings.pinned_message_id:
                         await self.edit_message_text(
                             message_id=msg_id,
                             chat_id=chat_id,
-                            text=self.format_settings_menu_html(),
-                            reply_markup=self.build_settings_keyboard(),
+                            text=self.format_settings_menu_html(subpage=subpage),
+                            reply_markup=self.build_settings_keyboard(subpage=subpage),
                         )
 
                     # Trigger dashboard update if live dashboard was re-enabled or ping/updated_time setting toggled
@@ -1739,12 +1813,13 @@ class TelegramBotService:
                 self.save_settings()
                 await self.update_dashboard(force=True)
 
-            if msg_id and chat_id:
+            subpage = self.get_setting_subpage(field_name)
+            if msg_id and chat_id and msg_id != self.settings.pinned_message_id:
                 await self.edit_message_text(
                     message_id=msg_id,
                     chat_id=chat_id,
-                    text=self.format_settings_menu_html(),
-                    reply_markup=self.build_settings_keyboard(),
+                    text=self.format_settings_menu_html(subpage=subpage),
+                    reply_markup=self.build_settings_keyboard(subpage=subpage),
                 )
             await self.answer_callback_query(callback_query_id=cb_id, text="Параметр обновлен")
             return True
