@@ -12,6 +12,14 @@ from src.server.auth_manager import (
 )
 from src.server.config import ServerConfig, load_server_config
 from src.server.logger import get_logger, setup_server_logging
+from src.server.ai_model_probe import (
+    DEFAULT_FREE_VISION_CANDIDATES,
+    POLLINATIONS_CHAT_URL,
+    create_sample_factorio_telemetry,
+    create_sample_test_png,
+    discover_openrouter_free_vision_models,
+    probe_vision_endpoint,
+)
 from src.server.session_manager import SessionLockManager, SessionState
 from src.server.storage import SaveStorageManager
 from src.server.stun_coordinator import StunCoordinatorProtocol, start_stun_coordinator
@@ -21,18 +29,23 @@ __version__ = "0.1.0"
 __all__ = [
     "AuthError",
     "AuthManager",
+    "DEFAULT_FREE_VISION_CANDIDATES",
     "InvalidInviteTicketError",
     "InviteTicketAlreadyUsedError",
     "InviteTicketExpiredError",
+    "POLLINATIONS_CHAT_URL",
     "RateLimitExceededError",
     "ServerConfig",
-    "load_server_config",
-    "setup_server_logging",
+    "create_sample_factorio_telemetry",
+    "create_sample_test_png",
+    "discover_openrouter_free_vision_models",
     "get_logger",
+    "load_server_config",
+    "probe_vision_endpoint",
     "SaveStorageManager",
     "SessionLockManager",
     "SessionState",
-    "StunCoordinatorProtocol",
+    "setup_server_logging",
     "start_stun_coordinator",
     "TelegramBotService",
     "TelegramBotSettings",
