@@ -28,7 +28,11 @@ from src.server.ai_model_probe import (
     probe_vision_endpoint,
 )
 from src.server.session_manager import SessionLockManager, SessionState
-from src.server.storage import SaveStorageManager
+from src.server.storage import (
+    SaveStorageManager,
+    format_cloud_world_label,
+    sanitize_world_name,
+)
 from src.server.stun_coordinator import StunCoordinatorProtocol, start_stun_coordinator
 from src.server.telegram_bot import (
     DASHBOARD_TIMEZONES,
@@ -56,10 +60,12 @@ __all__ = [
     "discover_openrouter_free_vision_models",
     "format_events_for_llm",
     "format_fallback_chronicle_post",
+    "format_cloud_world_label",
     "format_tz_label",
     "get_logger",
     "load_server_config",
     "probe_vision_endpoint",
+    "sanitize_world_name",
     "should_process_report",
     "SaveStorageManager",
     "SessionLockManager",

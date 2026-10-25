@@ -703,6 +703,36 @@ class TelegramBotService:
         except Exception as exc:
             logger.error("Error in notify_session_ended: %s", exc)
 
+    async def notify_world_archived(
+        self,
+        world_name: str,
+        archived_by: str,
+        archive_name: Optional[str] = None,
+    ) -> None:
+        """
+        Sends an alert when the active world is removed to archive, leaving the safe empty.
+        Updates pinned live dashboard message.
+
+        Args:
+            world_name: Name of the world that was archived.
+            archived_by: Player name or admin role that performed the action.
+            archive_name: Optional name of the archive file on VPS.
+        """
+        if not self.is_configured:
+            return
+
+        try:
+            w_name = html.escape(world_name)
+            p_name = html.escape(archived_by)
+            text = (
+                f"<b>[СЕЙФ]</b> Мир <b>{w_name} [Cloud]</b> убран с сервера в архив (игрок: <b>{p_name}</b>).\n"
+                "Сейчас на сервере не выбран никакой сейф — слот свободен для выбора или загрузки другого мира."
+            )
+            await self.send_message(text=text)
+            await self.update_dashboard(force=True)
+        except Exception as exc:
+            logger.error("Error in notify_world_archived: %s", exc)
+
     # --------------------------------------------------------------------------
     # Pinned Live Dashboard
     # --------------------------------------------------------------------------
@@ -781,13 +811,18 @@ class TelegramBotService:
         if self.storage_manager:
             meta = self.storage_manager.get_current_save_metadata()
             if meta.get("exists"):
-                version = meta.get("version", 1)
+                version = meta.get("version_counter", meta.get("version", 1))
                 size_mb = meta.get("size_bytes", 0) / (1024 * 1024)
                 uploaded_by = html.escape(str(meta.get("uploaded_by", "Неизвестно")))
-                lines.append(f"Мир в сейфе: v{version} ({size_mb:.1f} МБ)")
+                world_name = meta.get("world_name")
+                if world_name:
+                    lines.append(f"Мир в сейфе: <b>{html.escape(str(world_name))} [Cloud]</b> — v{version} ({size_mb:.1f} МБ)")
+                else:
+                    lines.append(f"Мир в сейфе: v{version} ({size_mb:.1f} МБ)")
                 lines.append(f"Сохранил: {uploaded_by}")
             else:
                 lines.append("Мир в сейфе: нет активного сохранения")
+                lines.append("Слот сервера: свободен для выбора нового мира")
 
         if self.settings.show_updated_time:
             now_str = self.format_time_with_tz(fmt="%H:%M:%S")
@@ -811,8 +846,11 @@ class TelegramBotService:
             "inline_keyboard": [
                 [
                     {"text": "Обновить статус", "callback_data": "dash:refresh"},
+                    {"text": "Миры в сейфе", "callback_data": "menu:worlds"},
+                ],
+                [
                     {"text": "Настройки бота", "callback_data": "menu:open"},
-                ]
+                ],
             ]
         }
 
@@ -1064,12 +1102,108 @@ class TelegramBotService:
                 {"text": "Пересоздать закреп", "callback_data": "action:repin"},
             ],
             [
+                {"text": "Миры в сейфе / Архив", "callback_data": "menu:worlds"},
                 {"text": "Создать Код Дружбы", "callback_data": "action:prompt_invite"},
             ],
             [
                 {"text": "Закрыть меню", "callback_data": "menu:close"},
             ],
         ]
+
+        return {"inline_keyboard": keyboard}
+
+    def format_worlds_menu_html(self) -> str:
+        """
+        Formats the interactive safe world manager and archive overview text.
+        Strictly zero emojis.
+        """
+        lines = ["<b>Управление мирами в Сейфе</b>\n"]
+
+        # Server state
+        state = "idle"
+        host_name = ""
+        if self.session_manager:
+            status = self.session_manager.get_public_status()
+            state = status.get("state", "idle")
+            host_name = status.get("host_name") or "Хост"
+
+        if state == "idle":
+            lines.append("Статус сервера: <b>[Свободен]</b>")
+        else:
+            lines.append(f"Статус сервера: <b>[Занят: {html.escape(host_name)}]</b>")
+
+        # Worlds info
+        worlds_info: Dict[str, Any] = {}
+        if self.storage_manager:
+            worlds_info = self.storage_manager.list_saved_worlds()
+
+        active = worlds_info.get("active_world")
+        lines.append("\n<b>Активный мир на сервере:</b>")
+        if active and active.get("exists", True):
+            w_name = html.escape(str(active.get("world_name") or "cloud_world"))
+            v = active.get("version_counter", 1)
+            sz = active.get("size_bytes", 0) / (1024 * 1024)
+            u = html.escape(str(active.get("uploaded_by") or "Неизвестно"))
+            lines.append(f"• <b>{w_name} [Cloud]</b> — v{v} ({sz:.1f} МБ, сохранил: {u})")
+        else:
+            lines.append("• <b>Не выбран (на сервере пусто)</b> — можно выбрать мир из архива ниже или загрузить новый из лаунчера.")
+
+        archived = worlds_info.get("archived_worlds", [])
+        lines.append(f"\n<b>Архив сохранённых миров на сервере ({len(archived)}):</b>")
+        if archived:
+            for idx, w in enumerate(archived[:10], 1):
+                w_name = html.escape(str(w.get("world_name") or "cloud_world"))
+                v = w.get("version_counter", 1)
+                sz = w.get("size_bytes", 0) / (1024 * 1024)
+                dt_str = ""
+                archived_at = w.get("archived_at")
+                if archived_at:
+                    try:
+                        dt = datetime.fromisoformat(archived_at)
+                        dt_str = f", {self.format_time_with_tz(dt, fmt='%Y-%m-%d %H:%M')}"
+                    except Exception:
+                        pass
+                lines.append(f"{idx}. <b>{w_name}</b> (v{v}, {sz:.1f} МБ{dt_str})")
+        else:
+            lines.append("<i>Архив сохранённых миров пока пуст.</i>")
+
+        backups = worlds_info.get("backups", [])
+        lines.append(f"\n<i>Авто-бэкапов ротации: {len(backups)} шт.</i>")
+
+        return "\n".join(lines)
+
+    def build_worlds_menu_keyboard(self) -> Dict[str, Any]:
+        """
+        Constructs inline keyboard for world management:
+        - Archiving current world to make safe empty
+        - Activating any archived world
+        - Refresh and back to settings navigation
+        """
+        keyboard: List[List[Dict[str, str]]] = []
+
+        worlds_info: Dict[str, Any] = {}
+        if self.storage_manager:
+            worlds_info = self.storage_manager.list_saved_worlds()
+
+        active = worlds_info.get("active_world")
+        if active and active.get("exists", True):
+            keyboard.append([
+                {"text": "Убрать текущий мир в архив (очистить слот)", "callback_data": "world:archive"}
+            ])
+
+        archived = worlds_info.get("archived_worlds", [])
+        for idx, w in enumerate(archived[:5]):
+            w_name = w.get("world_name") or "cloud_world"
+            v = w.get("version_counter", 1)
+            btn_text = f"Выбрать на сервер: {w_name} (v{v})"
+            keyboard.append([
+                {"text": btn_text, "callback_data": f"world:activate:{idx}"}
+            ])
+
+        keyboard.append([
+            {"text": "Обновить список", "callback_data": "menu:worlds"},
+            {"text": "К настройкам", "callback_data": "menu:open"},
+        ])
 
         return {"inline_keyboard": keyboard}
 
@@ -1425,6 +1559,133 @@ class TelegramBotService:
             if msg_id and chat_id:
                 await self.delete_message(message_id=msg_id, chat_id=chat_id)
             await self.answer_callback_query(callback_query_id=cb_id, text="Меню закрыто.")
+            return True
+
+        if cb_data == "menu:worlds":
+            w_text = self.format_worlds_menu_html()
+            w_kb = self.build_worlds_menu_keyboard()
+            # Never overwrite pinned dashboard
+            if msg_id and chat_id and msg_id != self.settings.pinned_message_id:
+                await self.edit_message_text(
+                    message_id=msg_id,
+                    chat_id=chat_id,
+                    text=w_text,
+                    reply_markup=w_kb,
+                )
+            else:
+                await self.send_message(text=w_text, chat_id=chat_id, reply_markup=w_kb)
+            await self.answer_callback_query(callback_query_id=cb_id)
+            return True
+
+        if cb_data == "world:archive":
+            if not self.storage_manager:
+                await self.answer_callback_query(
+                    callback_query_id=cb_id,
+                    text="Хранилище не подключено.",
+                    show_alert=True,
+                )
+                return True
+
+            state = "idle"
+            if self.session_manager:
+                state = self.session_manager.get_public_status().get("state", "idle")
+
+            if state != "idle":
+                await self.answer_callback_query(
+                    callback_query_id=cb_id,
+                    text="Нельзя убрать мир в архив, пока идет игра! Дождитесь завершения сессии.",
+                    show_alert=True,
+                )
+                return True
+
+            try:
+                res = self.storage_manager.archive_and_remove_current_world(deleted_by="Telegram Admin")
+                await self.notify_world_archived(
+                    world_name=res.get("world_name") or "cloud_world",
+                    archived_by="Telegram Admin",
+                    archive_name=res.get("archive_name"),
+                )
+                if msg_id and chat_id and msg_id != self.settings.pinned_message_id:
+                    await self.edit_message_text(
+                        message_id=msg_id,
+                        chat_id=chat_id,
+                        text=self.format_worlds_menu_html(),
+                        reply_markup=self.build_worlds_menu_keyboard(),
+                    )
+                await self.answer_callback_query(
+                    callback_query_id=cb_id,
+                    text="Мир успешно убран в архив сервера.",
+                )
+            except Exception as exc:
+                logger.error("Failed to archive world via telegram: %s", exc)
+                await self.answer_callback_query(
+                    callback_query_id=cb_id,
+                    text=f"Ошибка архивации: {exc}",
+                    show_alert=True,
+                )
+            return True
+
+        if cb_data.startswith("world:activate:"):
+            if not self.storage_manager:
+                await self.answer_callback_query(
+                    callback_query_id=cb_id,
+                    text="Хранилище не подключено.",
+                    show_alert=True,
+                )
+                return True
+
+            state = "idle"
+            if self.session_manager:
+                state = self.session_manager.get_public_status().get("state", "idle")
+
+            if state != "idle":
+                await self.answer_callback_query(
+                    callback_query_id=cb_id,
+                    text="Нельзя переключить мир, пока идет игра! Дождитесь завершения сессии.",
+                    show_alert=True,
+                )
+                return True
+
+            try:
+                idx = int(cb_data.split(":", 2)[2])
+                worlds_info = self.storage_manager.list_saved_worlds()
+                archived = worlds_info.get("archived_worlds", [])
+                if 0 <= idx < len(archived):
+                    target_archive = archived[idx]["archive_name"]
+                    res = self.storage_manager.activate_archived_world(
+                        archive_name=target_archive,
+                        activated_by="Telegram Admin",
+                    )
+                    w_name = res.get("world_name") or "cloud_world"
+                    await self.send_message(
+                        chat_id=chat_id,
+                        text=f"<b>[СЕЙФ]</b> Мир <b>{html.escape(w_name)} [Cloud]</b> выбран активным миром на сервере!",
+                    )
+                    await self.update_dashboard(force=True)
+                    if msg_id and chat_id and msg_id != self.settings.pinned_message_id:
+                        await self.edit_message_text(
+                            message_id=msg_id,
+                            chat_id=chat_id,
+                            text=self.format_worlds_menu_html(),
+                            reply_markup=self.build_worlds_menu_keyboard(),
+                        )
+                    await self.answer_callback_query(
+                        callback_query_id=cb_id,
+                        text="Мир успешно активирован на сервере!",
+                    )
+                else:
+                    await self.answer_callback_query(
+                        callback_query_id=cb_id,
+                        text="Выбранный архив не найден.",
+                        show_alert=True,
+                    )
+            except Exception as exc:
+                logger.error("Failed to activate world via telegram: %s", exc)
+                await self.answer_callback_query(
+                    callback_query_id=cb_id,
+                    text=f"Ошибка активации: {exc}",
+                    show_alert=True,
+                )
             return True
 
         if cb_data.startswith("toggle:"):
@@ -1886,6 +2147,12 @@ class TelegramBotService:
             await self.send_message(chat_id=chat_id, text=status_text)
             return True
 
+        if cmd == "/worlds":
+            w_text = self.format_worlds_menu_html()
+            w_kb = self.build_worlds_menu_keyboard()
+            await self.send_message(chat_id=chat_id, text=w_text, reply_markup=w_kb)
+            return True
+
         if cmd == "/ping":
             await self._handle_ping_command(chat_id)
             return True
@@ -2177,6 +2444,7 @@ class TelegramBotService:
         commands = [
             {"command": "ping", "description": "Пинг игроков и режим сети (P2P / Relay)"},
             {"command": "status", "description": "Текущий статус игрового сервера"},
+            {"command": "worlds", "description": "Миры в сейфе, архив и переключение слота"},
             {"command": "settings", "description": "Интерактивное меню настроек"},
             {"command": "set_tz", "description": "Установить часовой пояс (от -12 до +14)"},
             {"command": "invite", "description": "Создать Код Дружбы"},

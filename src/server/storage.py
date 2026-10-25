@@ -9,12 +9,13 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import threading
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from src.server.config import ServerConfig
 from src.server.logger import get_logger
@@ -32,6 +33,32 @@ class InvalidSaveArchiveError(StorageError):
 
 class SaveNotFoundError(StorageError):
     """Raised when an operation expects a save file that does not exist."""
+
+
+def sanitize_world_name(raw_name: Optional[str]) -> str:
+    """
+    Sanitizes and normalizes human-readable world name:
+    - Strips leading/trailing whitespace
+    - Strips .zip extension (case-insensitive)
+    - Strips trailing [Cloud] label if present to prevent duplication
+    - Limits length to 48 characters
+    """
+    if not raw_name or not isinstance(raw_name, str):
+        return ""
+    name = raw_name.strip()
+    if name.lower().endswith(".zip"):
+        name = name[:-4].strip()
+    if name.endswith("[Cloud]"):
+        name = name[:-7].strip()
+    return name[:48].strip()
+
+
+def format_cloud_world_label(world_name: Optional[str]) -> str:
+    """Formats human-readable display label with [Cloud] suffix."""
+    clean = sanitize_world_name(world_name)
+    if clean:
+        return f"{clean} [Cloud]"
+    return "cloud_world [Cloud]"
 
 
 class SaveStorageManager:
@@ -227,21 +254,25 @@ class SaveStorageManager:
         temp_file_path: Path,
         uploaded_by: str,
         mod_list: Optional[Any] = None,
+        world_name: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Atomically replaces the active cloud world save file with a new version.
         Guaranteed thread-safe and crash-resistant:
         1. Validates the integrity of the uploaded archive.
-        2. If unchanged (identical SHA-256), discards temp file and avoids redundant rotation.
-        3. If changed, performs circular backup rotation:
+        2. Determines effective world_name (preserving previous name during autosaves).
+        3. If unchanged (identical SHA-256), discards temp file and avoids redundant rotation.
+           Updates world_name in metadata if a new valid name was provided.
+        4. If changed, performs circular backup rotation:
            backup_2 -> backup_3, backup_1 -> backup_2, current -> backup_1.
-        4. Atomically replaces current_save_path via os.replace.
-        5. Updates and persists save_metadata.json (including mod_list if provided).
+        5. Atomically replaces current_save_path via os.replace.
+        6. Updates and persists save_metadata.json (including mod_list if provided).
 
         Args:
             temp_file_path: Path to the newly uploaded temporary archive.
             uploaded_by: Unique player nickname / identifier.
             mod_list: Optional list or dictionary of active mods.
+            world_name: Optional human-readable world name (e.g. 'Nauvis_Base').
 
         Returns:
             Dict[str, Any]: Save metadata details.
@@ -255,6 +286,8 @@ class SaveStorageManager:
 
         if not uploaded_by or not isinstance(uploaded_by, str):
             uploaded_by = "anonymous"
+
+        clean_world_name = sanitize_world_name(world_name)
 
         with self._lock:
             # 1. Validate temporary archive integrity
@@ -271,6 +304,18 @@ class SaveStorageManager:
             new_sha256 = self.compute_sha256(temp_file_path)
             new_size = temp_file_path.stat().st_size
             current_path = self.config.current_save_path
+            prev_metadata = self._read_metadata_file_locked()
+            prev_world_name = prev_metadata.get("world_name") if prev_metadata.get("exists") else None
+
+            # Determine effective world_name
+            if clean_world_name and clean_world_name != "cloud_world":
+                effective_world_name = clean_world_name
+            elif prev_world_name:
+                effective_world_name = prev_world_name
+            elif clean_world_name:
+                effective_world_name = clean_world_name
+            else:
+                effective_world_name = "cloud_world"
 
             # 2. Check if current save exists and is identical
             if current_path.exists() and current_path.is_file():
@@ -284,6 +329,13 @@ class SaveStorageManager:
                         )
                         temp_file_path.unlink(missing_ok=True)
                         metadata = self._get_current_save_metadata_locked()
+
+                        # Update world_name if a new non-default name was provided
+                        if clean_world_name and clean_world_name != "cloud_world" and clean_world_name != prev_world_name:
+                            metadata["world_name"] = clean_world_name
+                            metadata["display_world_name"] = format_cloud_world_label(clean_world_name)
+                            self._write_metadata_file_locked(metadata)
+
                         metadata["status"] = "unchanged"
                         return metadata
                 except Exception as check_err:
@@ -301,17 +353,17 @@ class SaveStorageManager:
                 current_path.parent.mkdir(parents=True, exist_ok=True)
                 os.replace(str(temp_file_path), str(current_path))
                 logger.info(
-                    "Atomically committed new save: %s (size: %d bytes, SHA-256: %s)",
+                    "Atomically committed new save: %s (size: %d bytes, SHA-256: %s, world: %s)",
                     current_path.name,
                     new_size,
                     new_sha256,
+                    effective_world_name,
                 )
             except Exception as replace_err:
                 logger.error("Atomic replace failed from %s to %s: %s", temp_file_path, current_path, replace_err)
                 raise StorageError(f"Failed to commit save file: {replace_err}") from replace_err
 
             # 5. Determine version counter and update metadata
-            prev_metadata = self._read_metadata_file_locked()
             prev_version = prev_metadata.get("version_counter", 0) if prev_metadata.get("exists") else 0
             new_version = prev_version + 1
 
@@ -319,6 +371,8 @@ class SaveStorageManager:
                 "exists": True,
                 "status": "updated",
                 "filename": self.config.current_save_filename,
+                "world_name": effective_world_name,
+                "display_world_name": format_cloud_world_label(effective_world_name),
                 "sha256": new_sha256,
                 "size_bytes": new_size,
                 "updated_at": datetime.now(timezone.utc).isoformat(),
@@ -431,6 +485,7 @@ class SaveStorageManager:
     def _get_current_save_metadata_locked(self) -> Dict[str, Any]:
         """
         Retrieves metadata of the current active save while holding self._lock.
+        Ensures world_name and display_world_name are populated.
         """
         current_path = self.config.current_save_path
         if not current_path.exists() or not current_path.is_file():
@@ -438,6 +493,10 @@ class SaveStorageManager:
 
         metadata = self._read_metadata_file_locked()
         if metadata.get("exists"):
+            if "world_name" not in metadata or not metadata["world_name"]:
+                metadata["world_name"] = "cloud_world"
+            if "display_world_name" not in metadata or not metadata["display_world_name"]:
+                metadata["display_world_name"] = format_cloud_world_label(metadata["world_name"])
             return metadata
 
         # Reconstruct metadata if file exists on disk but metadata file was missing
@@ -448,6 +507,8 @@ class SaveStorageManager:
             reconstructed: Dict[str, Any] = {
                 "exists": True,
                 "filename": self.config.current_save_filename,
+                "world_name": "cloud_world",
+                "display_world_name": format_cloud_world_label("cloud_world"),
                 "sha256": sha256,
                 "size_bytes": size_bytes,
                 "updated_at": mtime,
@@ -511,6 +572,7 @@ class SaveStorageManager:
 
             prev_metadata = self._read_metadata_file_locked()
             prev_version = prev_metadata.get("version_counter", 0) if prev_metadata.get("exists") else 0
+            restored_world_name = prev_metadata.get("world_name") or "cloud_world"
 
             new_sha256 = self.compute_sha256(current_path)
             new_size = current_path.stat().st_size
@@ -519,6 +581,8 @@ class SaveStorageManager:
                 "exists": True,
                 "status": "restored",
                 "filename": self.config.current_save_filename,
+                "world_name": restored_world_name,
+                "display_world_name": format_cloud_world_label(restored_world_name),
                 "sha256": new_sha256,
                 "size_bytes": new_size,
                 "updated_at": datetime.now(timezone.utc).isoformat(),
@@ -529,16 +593,45 @@ class SaveStorageManager:
             self._write_metadata_file_locked(restored_metadata)
             return restored_metadata
 
+    def _read_archives_index_locked(self) -> Dict[str, Dict[str, Any]]:
+        """Reads backups_dir / 'archives_index.json'. Must hold self._lock."""
+        index_file = self.config.backups_dir / "archives_index.json"
+        if not index_file.exists():
+            return {}
+        try:
+            with open(index_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    return data
+        except Exception as exc:
+            logger.warning("Failed to read archives_index.json: %s", exc)
+        return {}
+
+    def _write_archives_index_locked(self, data: Dict[str, Dict[str, Any]]) -> None:
+        """Writes backups_dir / 'archives_index.json' atomically. Must hold self._lock."""
+        index_file = self.config.backups_dir / "archives_index.json"
+        tmp_file = index_file.with_suffix(".tmp")
+        try:
+            index_file.parent.mkdir(parents=True, exist_ok=True)
+            with open(tmp_file, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+            os.replace(str(tmp_file), str(index_file))
+        except Exception as exc:
+            logger.error("Failed to write archives_index.json: %s", exc)
+            if tmp_file.exists():
+                tmp_file.unlink(missing_ok=True)
+
     def archive_and_remove_current_world(self, deleted_by: str = "Player") -> Dict[str, Any]:
         """
         Архивирует текущий активный мир cloud_world.zip в backups/ и удаляет его с сервера,
         делая сервер пустым (готовым для публикации нового мира).
 
         1. Поворачивает существующие бэкапы (current -> backup_1, backup_1 -> backup_2).
-        2. Дополнительно создает несгораемый архив с временной меткой в backups_dir.
-        3. Удаляет активный файл cloud_world.zip.
-        4. Обновляет save_metadata.json (exists = False).
-        5. Очищает текущий mod-list.json.
+        2. Дополнительно создает несгораемый архив с именем мира, датой и версией в backups_dir.
+        3. Записывает метаданные архива в archives_index.json.
+        4. Удаляет активный файл cloud_world.zip.
+        5. Обновляет save_metadata.json (exists = False).
+        6. Очищает текущий mod-list.json.
         """
         with self._lock:
             current_path = self.config.current_save_path
@@ -549,12 +642,19 @@ class SaveStorageManager:
                     "message": "На сервере нет активного мира для удаления",
                 }
 
+            prev_meta = self._read_metadata_file_locked()
+            world_name = prev_meta.get("world_name") or "cloud_world"
+            version = prev_meta.get("version_counter", 1)
+            uploaded_by = prev_meta.get("uploaded_by") or "Player"
+            size_bytes = current_path.stat().st_size
+
             # 1. Поворачиваем циклические бэкапы
             self._rotate_backups_locked()
 
-            # 2. Создаем постоянный именованный архив с датой и временем
+            # 2. Создаем постоянный именованный архив с датой и именем мира
+            safe_slug = re.sub(r"[^\w\-]+", "_", world_name).strip("_") or "cloud_world"
             ts_str = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-            archive_name = f"archived_{ts_str}_{self.config.current_save_filename}"
+            archive_name = f"archived_{ts_str}_{safe_slug}_v{version}.zip"
             archive_path = self.config.backups_dir / archive_name
             try:
                 shutil.copy2(current_path, archive_path)
@@ -562,7 +662,21 @@ class SaveStorageManager:
             except Exception as arc_err:
                 logger.warning("Failed to copy permanent archive: %s", arc_err)
 
-            # 3. Удаляем активный файл мира
+            # 3. Сохраняем запись в archives_index.json
+            archives_index = self._read_archives_index_locked()
+            archives_index[archive_name] = {
+                "archive_name": archive_name,
+                "world_name": world_name,
+                "display_world_name": format_cloud_world_label(world_name),
+                "version_counter": version,
+                "size_bytes": size_bytes,
+                "archived_at": datetime.now(timezone.utc).isoformat(),
+                "archived_by": deleted_by,
+                "uploaded_by": uploaded_by,
+            }
+            self._write_archives_index_locked(archives_index)
+
+            # 4. Удаляем активный файл мира
             try:
                 current_path.unlink()
                 logger.info("Active save file %s unlinked from server", current_path)
@@ -570,17 +684,20 @@ class SaveStorageManager:
                 logger.error("Failed to unlink active save %s: %s", current_path, unl_err)
                 raise StorageError(f"Не удалось удалить файл мира: {unl_err}") from unl_err
 
-            # 4. Обновляем save_metadata.json
+            # 5. Обновляем save_metadata.json
             new_metadata: Dict[str, Any] = {
                 "exists": False,
                 "status": "archived",
+                "world_name": None,
+                "display_world_name": None,
+                "last_archived_world_name": world_name,
                 "archived_at": datetime.now(timezone.utc).isoformat(),
                 "archived_by": deleted_by,
                 "archive_file": archive_name,
             }
             self._write_metadata_file_locked(new_metadata)
 
-            # 5. Очищаем mod-list.json (если был)
+            # 6. Очищаем mod-list.json (если был)
             mod_file = self.config.storage_dir / "mod-list.json"
             if mod_file.exists():
                 try:
@@ -591,9 +708,196 @@ class SaveStorageManager:
             return {
                 "success": True,
                 "exists": False,
-                "message": f"Мир успешно перемещен в архив сервера ({archive_name}) и снят с публикации.",
+                "message": f"Мир {format_cloud_world_label(world_name)} успешно перемещен в архив сервера ({archive_name}) и снят с публикации.",
                 "archive_name": archive_name,
+                "world_name": world_name,
+                "display_world_name": format_cloud_world_label(world_name),
             }
+
+    def list_saved_worlds(self) -> Dict[str, Any]:
+        """
+        Lists active world, archived worlds, and cyclic backups.
+
+        Returns:
+            Dict[str, Any]: {
+                "active_world": Optional[Dict[str, Any]],
+                "archived_worlds": List[Dict[str, Any]],
+                "backups": List[Dict[str, Any]],
+            }
+        """
+        with self._lock:
+            meta = self._get_current_save_metadata_locked()
+            active_world: Optional[Dict[str, Any]] = None
+            if meta.get("exists"):
+                active_world = dict(meta)
+
+            archives_index = self._read_archives_index_locked()
+            archived_worlds: List[Dict[str, Any]] = []
+
+            # Scan backups_dir for archived_*.zip
+            if self.config.backups_dir.exists():
+                for fpath in self.config.backups_dir.glob("archived_*.zip"):
+                    if not fpath.is_file():
+                        continue
+                    fname = fpath.name
+                    stat = fpath.stat()
+                    entry = archives_index.get(fname)
+                    if entry:
+                        item = dict(entry)
+                        item["size_bytes"] = stat.st_size
+                        item["mtime"] = stat.st_mtime
+                    else:
+                        # Fallback parsing for archives created before index
+                        parsed_name = fname
+                        parsed_version = 1
+                        m = re.match(r"^archived_\d{8}_\d{6}_(.+?)_v(\d+)\.zip$", fname)
+                        if m:
+                            parsed_name = m.group(1)
+                            parsed_version = int(m.group(2))
+                        else:
+                            m2 = re.match(r"^archived_\d{8}_\d{6}_(.+?)\.zip$", fname)
+                            if m2:
+                                parsed_name = m2.group(1)
+
+                        world_name_clean = sanitize_world_name(parsed_name) or "cloud_world"
+                        archived_at_str = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat()
+                        item = {
+                            "archive_name": fname,
+                            "world_name": world_name_clean,
+                            "display_world_name": format_cloud_world_label(world_name_clean),
+                            "version_counter": parsed_version,
+                            "size_bytes": stat.st_size,
+                            "archived_at": archived_at_str,
+                            "archived_by": "System",
+                            "uploaded_by": "unknown",
+                            "mtime": stat.st_mtime,
+                        }
+                    archived_worlds.append(item)
+
+            # Sort archived_worlds by mtime descending (newest first)
+            archived_worlds.sort(key=lambda x: x.get("mtime", 0.0), reverse=True)
+
+            # Scan cyclic backups
+            backups: List[Dict[str, Any]] = []
+            for i in range(1, self.config.max_backups + 1):
+                bpath = self.config.backups_dir / f"backup_{i}.zip"
+                if bpath.exists() and bpath.is_file():
+                    bstat = bpath.stat()
+                    backups.append({
+                        "filename": bpath.name,
+                        "backup_index": i,
+                        "size_bytes": bstat.st_size,
+                        "mtime": bstat.st_mtime,
+                        "updated_at": datetime.fromtimestamp(bstat.st_mtime, tz=timezone.utc).isoformat(),
+                    })
+
+            return {
+                "active_world": active_world,
+                "archived_worlds": archived_worlds,
+                "backups": backups,
+            }
+
+    def activate_archived_world(self, archive_name: str, activated_by: str = "Admin") -> Dict[str, Any]:
+        """
+        Restores an archived world from backups_dir into the active world slot.
+        If an active world currently exists, it is automatically archived first
+        to guarantee zero data loss.
+
+        Args:
+            archive_name: Filename of the archive (must be within backups_dir, no path traversal).
+            activated_by: Nickname or role of the player/admin activating the world.
+
+        Returns:
+            Dict[str, Any]: Updated active save metadata.
+
+        Raises:
+            ValueError: If archive_name is invalid or attempts path traversal.
+            FileNotFoundError: If the archive file does not exist.
+            InvalidSaveArchiveError: If the archive is corrupt.
+            StorageError: On I/O failure.
+        """
+        if not archive_name or not isinstance(archive_name, str):
+            raise ValueError("archive_name must be a non-empty string")
+
+        clean_filename = Path(archive_name).name
+        if clean_filename != archive_name or ".." in archive_name or "/" in archive_name or "\\" in archive_name:
+            raise ValueError(f"Invalid archive_name: {archive_name}")
+
+        with self._lock:
+            archive_path = self.config.backups_dir / clean_filename
+            if not archive_path.exists() or not archive_path.is_file():
+                raise FileNotFoundError(f"Archive file {clean_filename} not found in backups directory")
+
+            # Validate ZIP integrity
+            if not self.validate_zip_archive(archive_path):
+                raise InvalidSaveArchiveError(f"Archive {clean_filename} failed integrity validation")
+
+            # If an active world currently exists, archive it first to preserve progress
+            current_path = self.config.current_save_path
+            if current_path.exists() and current_path.is_file():
+                logger.info(
+                    "Current active world exists. Archiving current world before activating %s",
+                    clean_filename,
+                )
+                self.archive_and_remove_current_world(deleted_by=f"Auto-archived before activating {clean_filename}")
+
+            # Read archive info from index
+            archives_index = self._read_archives_index_locked()
+            archive_meta = archives_index.get(clean_filename, {})
+            target_world_name = archive_meta.get("world_name")
+            if not target_world_name:
+                m = re.match(r"^archived_\d{8}_\d{6}_(.+?)_v(\d+)\.zip$", clean_filename)
+                if m:
+                    target_world_name = sanitize_world_name(m.group(1))
+                else:
+                    target_world_name = "cloud_world"
+
+            # Compute sha and size of archive
+            new_sha256 = self.compute_sha256(archive_path)
+            new_size = archive_path.stat().st_size
+
+            # Atomic copy to current_save_path via tmp_dir
+            tmp_staging = self.config.tmp_dir / f"activate_{clean_filename}_{datetime.now().timestamp()}"
+            try:
+                shutil.copy2(archive_path, tmp_staging)
+                current_path.parent.mkdir(parents=True, exist_ok=True)
+                os.replace(str(tmp_staging), str(current_path))
+            except Exception as copy_err:
+                if tmp_staging.exists():
+                    tmp_staging.unlink(missing_ok=True)
+                logger.error("Failed to move archive to current save path: %s", copy_err)
+                raise StorageError(f"Failed to activate archive: {copy_err}") from copy_err
+
+            # Read previous metadata to increment version counter
+            prev_metadata = self._read_metadata_file_locked()
+            prev_version = prev_metadata.get("version_counter", 0) if prev_metadata.get("exists") else 0
+            new_version = prev_version + 1
+
+            new_metadata: Dict[str, Any] = {
+                "exists": True,
+                "status": "activated",
+                "filename": self.config.current_save_filename,
+                "world_name": target_world_name,
+                "display_world_name": format_cloud_world_label(target_world_name),
+                "sha256": new_sha256,
+                "size_bytes": new_size,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+                "uploaded_by": activated_by,
+                "version_counter": new_version,
+            }
+            self._write_metadata_file_locked(new_metadata)
+
+            # Remove the activated archive from backups_dir and index
+            try:
+                archive_path.unlink(missing_ok=True)
+                if clean_filename in archives_index:
+                    del archives_index[clean_filename]
+                    self._write_archives_index_locked(archives_index)
+                logger.info("Activated archive %s as active world (%s)", clean_filename, target_world_name)
+            except Exception as cleanup_err:
+                logger.warning("Error cleaning up activated archive file %s: %s", clean_filename, cleanup_err)
+
+            return new_metadata
 
     def _read_metadata_file_locked(self) -> Dict[str, Any]:
         """Reads metadata JSON file. Must be called while holding self._lock."""

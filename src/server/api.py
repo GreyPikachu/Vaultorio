@@ -295,6 +295,8 @@ def create_app(
                 "lease_remaining_seconds": session_status.get("lease_remaining_seconds"),
                 "active_guests": session_status.get("active_guests", []),
                 "save_exists": save_meta.get("exists", False),
+                "world_name": save_meta.get("world_name"),
+                "display_world_name": save_meta.get("display_world_name"),
                 "sha256": save_meta.get("sha256"),
                 "version_counter": save_meta.get("version_counter", 0),
             }
@@ -514,6 +516,7 @@ def create_app(
         expected_sha256: Optional[str] = Form(None),
         x_expected_sha256: Optional[str] = Header(None, alias="X-Expected-SHA256"),
         mod_list_json: Optional[str] = Form(None),
+        world_name: Optional[str] = Form(None),
         release_on_success: bool = Form(True),
     ) -> JSONResponse:
         """
@@ -611,6 +614,7 @@ def create_app(
                 temp_file_path=temp_path,
                 uploaded_by=host_name,
                 mod_list=parsed_mods,
+                world_name=world_name,
             )
         except InvalidSaveArchiveError as bad_archive:
             return JSONResponse(status_code=400, content={"error": "invalid_archive", "message": str(bad_archive)})
@@ -714,6 +718,14 @@ def create_app(
 
         try:
             res = app_storage.archive_and_remove_current_world(deleted_by=player_name)
+            if app_telegram and app_telegram.is_configured:
+                _dispatch_tg_hook(
+                    app_telegram.notify_world_archived(
+                        world_name=res.get("world_name") or "cloud_world",
+                        archived_by=player_name,
+                        archive_name=res.get("archive_name"),
+                    )
+                )
             return JSONResponse(status_code=200, content=res)
         except Exception as exc:
             logger.error("Failed to reset world: %s", exc, exc_info=True)
@@ -721,6 +733,69 @@ def create_app(
                 status_code=500,
                 content={"error": "reset_world_failed", "message": str(exc)},
             )
+
+    @app.get("/worlds", dependencies=[Depends(verify_device_token)])
+    async def list_worlds() -> JSONResponse:
+        """
+        Returns full list of worlds on server:
+        active world, archived worlds, and cyclic backups, along with server state.
+        """
+        try:
+            worlds_data = app_storage.list_saved_worlds()
+            session_status = app_session.get_public_status()
+            worlds_data["state"] = session_status.get("state")
+            worlds_data["host_name"] = session_status.get("host_name")
+            return JSONResponse(status_code=200, content=worlds_data)
+        except Exception as exc:
+            logger.error("Failed to list saved worlds: %s", exc, exc_info=True)
+            return JSONResponse(status_code=500, content={"error": "list_worlds_failed", "message": str(exc)})
+
+    @app.post("/worlds/activate", dependencies=[Depends(verify_device_token)])
+    async def activate_world(request: Request) -> JSONResponse:
+        """
+        Activates an archived world on the server.
+        Only allowed when server is idle.
+        """
+        status = app_session.get_public_status()
+        state = status.get("state")
+        if state != "idle":
+            host_name = status.get("host_name") or "другой игрок"
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "error": "server_busy",
+                    "message": f"Сейчас на сервере играет {host_name}. Переключить мир можно только когда сервер свободен.",
+                },
+            )
+
+        archive_name: Optional[str] = None
+        player_name = "Player"
+        try:
+            body = await request.json()
+            if isinstance(body, dict):
+                archive_name = body.get("archive_name")
+                player_name = body.get("player_name") or body.get("activated_by") or "Player"
+        except Exception:
+            pass
+
+        if not archive_name or not isinstance(archive_name, str):
+            return JSONResponse(
+                status_code=400,
+                content={"error": "missing_archive_name", "message": "Параметр archive_name обязателен"},
+            )
+
+        try:
+            res = app_storage.activate_archived_world(archive_name=archive_name, activated_by=player_name)
+            if app_telegram and app_telegram.is_configured:
+                _dispatch_tg_hook(app_telegram.update_dashboard(force=True))
+            return JSONResponse(status_code=200, content=res)
+        except FileNotFoundError as fnf:
+            return JSONResponse(status_code=404, content={"error": "archive_not_found", "message": str(fnf)})
+        except (InvalidSaveArchiveError, ValueError) as bad_req:
+            return JSONResponse(status_code=400, content={"error": "invalid_archive", "message": str(bad_req)})
+        except Exception as exc:
+            logger.error("Failed to activate archived world: %s", exc, exc_info=True)
+            return JSONResponse(status_code=500, content={"error": "activate_failed", "message": str(exc)})
 
     @app.post("/chronicle/report", dependencies=[Depends(verify_device_token)])
     async def report_chronicle(
