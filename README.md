@@ -10,7 +10,7 @@
   <img alt="Factorio" src="https://img.shields.io/badge/Factorio-2.0_Space_Age-FF6F00?style=flat-square&logo=factorio&logoColor=white">
   <img alt="P2P UDP" src="https://img.shields.io/badge/UDP_Hole_Punching-15--25ms_Ping-10B981?style=flat-square">
   <img alt="Zero VPN" src="https://img.shields.io/badge/Zero_VPN-Hamachi_Free-6366F1?style=flat-square">
-  <img alt="Tests" src="https://img.shields.io/badge/Tests-308_Passed-brightgreen?style=flat-square">
+  <img alt="Tests" src="https://img.shields.io/badge/Tests-415_Passed-brightgreen?style=flat-square">
 </p>
 
 Децентрализованная система для комфортной кооперативной игры в non-Steam и standalone Factorio без сторонних VPN-утилит (Hamachi, Radmin VPN, Tailscale). Архитектурная концепция «Сейф + Перехватчик» обеспечивает минимальный прямой P2P-пинг между игроками (15–25 мс), автоматическое сохранение общего мира в облачном хранилище на легковесном VPS (< 25 МБ RAM) и абсолютную защиту от конфликтов и рассинхронизации.
@@ -139,6 +139,23 @@ flowchart TD
 - Все сетевые эндпоинты требуют авторизации токенами устройств (`device_token`).
 - Администратор генерирует зашифрованный Код Дружбы `FCT1-...` (PBKDF2-HMAC-SHA256, 100 000 итераций + шифрование AES CTR + HMAC-SHA256). Адрес и порт сервера полностью скрыты от неавторизованного внешнего сканирования.
 
+**8. Живой статус в Telegram и интерактивное управление (Live Status Dashboard)**
+- Интегрированный асинхронный сервис Telegram-бота на сервере (`src/server/telegram_bot.py`), потребляющий считанные мегабайты памяти (< 5 МБ RAM).
+- Закрепленное живое табло в чате компании: обновляется в реальном времени при входе/выходе игроков, отображает имя Хоста, подключенных Гостей, длительность сессии, версию и размер сохранения.
+- Интерактивное меню настроек `/settings` с inline-кнопками: переключение уведомлений, выбор режима хроник, создание новых Кодов Дружбы прямо из Telegram.
+
+**9. ИИ-Хроники Наувиса и автопостинг скриншотов базы (AI Chronicles)**
+- Автоматически устанавливаемый легковесный мод `factorio-coop-chronicle`: перехватывает ключевые события игры (гибель инженера от кусак, изучение технологий, запуски ракет, возведение ядерных реакторов).
+- Автоматическое создание скриншотов с камеры игрока в светлое время суток (`daytime=0.5`).
+- Трехуровневый каскад ИИ-генерации репортажей (`src/server/ai_chronicle.py`):
+  - **Tier 1 (OpenRouter Vision):** мультимодальный анализ скриншота базы и телеметрии нейросетью.
+  - **Tier 2 (Zero-Key Pollinations):** автоматическая текстовая генерация без необходимости указывать API-ключ.
+  - **Tier 3 (Local Template Fallback):** локальный шаблонный генератор при отсутствии связи.
+- Ролевые стили публикаций в Telegram-канал: военный корреспондент (`reporter`), бортовой саркастичный ИИ (`ship_ai`) или дружелюбный летописец (`friendly`).
+
+**10. Архивация и сброс мира на сервере**
+- В окне управления миром по `Shift` доступна функция сброса текущей карты с автоматическим архивированием на VPS и возможностью локального скачивания копии.
+
 ## Стек технологий
 
 <div align="center">
@@ -150,7 +167,7 @@ flowchart TD
   <br>
   <img alt="Asyncio" src="https://img.shields.io/badge/Asyncio_UDP-2563EB?style=for-the-badge">
   <img alt="HTTPX" src="https://img.shields.io/badge/HTTPX-5B21B6?style=for-the-badge">
-  <img alt="Pytest" src="https://img.shields.io/badge/Pytest_308_Tests-0A9EDC?style=for-the-badge&logo=pytest&logoColor=white">
+  <img alt="Pytest" src="https://img.shields.io/badge/Pytest_415_Tests-0A9EDC?style=for-the-badge&logo=pytest&logoColor=white">
 </div>
 
 ## Быстрый старт
@@ -192,6 +209,9 @@ cd /opt/factorio-hub
 
 # Очистка устаревших и использованных билетов
 ./venv/bin/python3 -m src.server.admin_cli cleanup
+
+# Настройка Telegram-бота (живой статус чата и хроника)
+./venv/bin/python3 -m src.server.admin_cli setup-telegram --bot-token "ТОКЕН_БОТА" --chat-id "-100123456789"
 ```
 
 ### Установка для игроков (macOS и Windows)
@@ -261,6 +281,8 @@ FactorioSetup/
 │   └── showcase/                   # Иконка и скриншоты интерфейса
 ├── src/
 │   ├── client/                     # Клиентское ядро перехватчика
+│   │   ├── chronicle_mod.py        # Генератор и установщик Lua-мода factorio-coop-chronicle
+│   │   ├── chronicle_watcher.py    # Демон отслеживания игровых событий и скриншотов
 │   │   ├── config.py               # Параметры клиента и барьеры портов
 │   │   ├── factorio_env.py         # Пути игры, Split-Brain Shield, никнеймы
 │   │   ├── factorio_wrapper.py     # Точка входа перехватчика
@@ -275,22 +297,25 @@ FactorioSetup/
 │   │   └── invite_codec.py         # Кодек инвайтов FCT1-... (PBKDF2 + AES + HMAC)
 │   ├── installer/                  # Логика инсталлятора и деинсталлятора
 │   │   └── installer.py            # FactorioWrapperInstaller
-│   └── server/                     # Сервер Сейфа и STUN
-│       ├── admin_cli.py            # CLI администратора (создание инвайтов, отзыв)
-│       ├── api.py                  # FastAPI REST роутер со Stealth Mode
+│   └── server/                     # Сервер Сейфа, Telegram и STUN
+│       ├── admin_cli.py            # CLI администратора (создание инвайтов, Telegram setup)
+│       ├── ai_chronicle.py         # 3-уровневый каскад ИИ-хроники (Vision/Pollinations/Local)
+│       ├── ai_model_probe.py       # Зондирование бесплатных Vision-моделей OpenRouter
+│       ├── api.py                  # FastAPI REST роутер со Stealth Mode и хуками
 │       ├── auth_manager.py         # Управление билетами и токенами устройств
 │       ├── config.py               # Конфигурация сервера
 │       ├── main.py                 # Точка входа сервера
 │       ├── schemas.py              # Pydantic-схемы валидации
 │       ├── session_manager.py      # SessionLockManager (4-фазный автомат)
-│       ├── storage.py              # SaveStorageManager (атомарное хранилище)
-│       └── stun_coordinator.py     # UDP STUN координатор (14197/udp)
-└── tests/                          # 308 автоматических тестов (модульные и E2E)
+│       ├── storage.py              # SaveStorageManager (атомарное хранилище и сброс)
+│       ├── stun_coordinator.py     # UDP STUN координатор (14197/udp)
+│       └── telegram_bot.py         # Асинхронный сервис Telegram-бота с Live Dashboard
+└── tests/                          # 415 автоматических тестов (модульные, интеграционные и E2E)
 ```
 
 ## Разработка и тестирование
 
-Проект покрыт всесторонним тестовым комплектом из 308 автоматических тестов (включая 270+ базовых и расширенных проверок: модульные, интеграционные, E2E-сценарии перехвата, изоляция одиночной игры, проверка утечек IP и синтаксиса):
+Проект покрыт всесторонним тестовым комплектом из 415 автоматических тестов (включая модульные, интеграционные, E2E-сценарии перехвата, изоляцию одиночной игры, интеграцию с Telegram Bot API, AI Chronicle и валидацию моделей):
 
 ```bash
 # Активация окружения и запуск тестов
