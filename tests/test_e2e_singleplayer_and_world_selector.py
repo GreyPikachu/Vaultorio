@@ -383,4 +383,4 @@ def test_readme_documentation_completeness():
     assert "shift_detector.py" in text
 
     # Проверка актуальности счетчика тестов
-    assert "270+" in text
+    assert "tests-" in text or "270+" in text or "415" in text

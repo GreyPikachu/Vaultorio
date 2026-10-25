@@ -14,6 +14,7 @@ import html
 import json
 import os
 from pathlib import Path
+import secrets
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -878,6 +879,233 @@ class TelegramBotService:
 
         return {"inline_keyboard": keyboard}
 
+    @staticmethod
+    def _format_readable_ttl(ttl_seconds: int) -> str:
+        """Returns human-friendly string for duration in seconds."""
+        if ttl_seconds < 3600:
+            return f"{ttl_seconds // 60} мин."
+        elif ttl_seconds < 86400:
+            return f"{ttl_seconds // 3600} ч."
+        elif ttl_seconds == 86400:
+            return "24 часа (1 сутки)"
+        elif ttl_seconds == 259200:
+            return "3 дня"
+        elif ttl_seconds == 604800:
+            return "7 дней (1 неделя)"
+        elif ttl_seconds == 2592000:
+            return "30 дней (1 месяц)"
+        else:
+            return f"{ttl_seconds // 86400} дн."
+
+    @staticmethod
+    def _format_readable_uses(max_uses: int) -> str:
+        """Returns human-friendly string for activation limits."""
+        if max_uses == 1:
+            return "1 игрок (одноразовый)"
+        elif max_uses >= 100:
+            return "Без ограничений"
+        elif max_uses in (2, 3, 4):
+            return f"{max_uses} игрока"
+        else:
+            return f"{max_uses} игроков"
+
+    @staticmethod
+    def build_invite_wizard_keyboard(selected_ttl: int = 86400, selected_uses: int = 1) -> Dict[str, Any]:
+        """Builds interactive inline keyboard for selecting invite expiration and max uses."""
+        ttl_row1 = [
+            (900, "15 мин"),
+            (1800, "30 мин"),
+            (7200, "2 ч"),
+            (21600, "6 ч"),
+        ]
+        ttl_row2 = [
+            (86400, "24 ч"),
+            (259200, "3 дня"),
+            (604800, "7 дней"),
+            (2592000, "30 дней"),
+        ]
+        uses_row = [
+            (1, "1 игрок"),
+            (2, "2 игрока"),
+            (5, "5 игроков"),
+            (100, "Без лимита"),
+        ]
+
+        def _ttl_btn(sec: int, label: str) -> Dict[str, str]:
+            text = f"[• {label}]" if sec == selected_ttl else label
+            return {"text": text, "callback_data": f"wiz:s:{sec}:{selected_uses}"}
+
+        def _uses_btn(count: int, label: str) -> Dict[str, str]:
+            text = f"[• {label}]" if count == selected_uses else label
+            return {"text": text, "callback_data": f"wiz:s:{selected_ttl}:{count}"}
+
+        keyboard = [
+            [_ttl_btn(sec, lbl) for sec, lbl in ttl_row1],
+            [_ttl_btn(sec, lbl) for sec, lbl in ttl_row2],
+            [_uses_btn(cnt, lbl) for cnt, lbl in uses_row],
+            [
+                {
+                    "text": "Создать Код Дружбы",
+                    "callback_data": f"wiz:g:{selected_ttl}:{selected_uses}",
+                }
+            ],
+            [
+                {
+                    "text": "Назад в настройки",
+                    "callback_data": "menu:main",
+                }
+            ],
+        ]
+        return {"inline_keyboard": keyboard}
+
+    @classmethod
+    def format_invite_wizard_html(cls, selected_ttl: int = 86400, selected_uses: int = 1) -> str:
+        """Formats interactive invite constructor message in HTML."""
+        ttl_str = cls._format_readable_ttl(selected_ttl)
+        uses_str = cls._format_readable_uses(selected_uses)
+
+        return (
+            "<b>Конструктор Кода Дружбы (Invite Wizard)</b>\n\n"
+            "Текущие параметры кода:\n"
+            f"• <b>Срок действия:</b> {html.escape(ttl_str)}\n"
+            f"• <b>Лимит активаций:</b> {html.escape(uses_str)}\n\n"
+            "<i>Выберите срок действия и количество игроков кнопками ниже, затем нажмите кнопку создания:</i>"
+        )
+
+    @classmethod
+    def format_invite_success_html(cls, invite_info: Dict[str, Any]) -> str:
+        """Formats generated invite code with color syntax highlight and copyable blocks."""
+        code = invite_info.get("invite_code", "")
+        passphrase = invite_info.get("passphrase", "")
+        ttl_sec = invite_info.get("ttl_seconds", 86400)
+        uses = invite_info.get("max_uses", 1)
+        expires_at = invite_info.get("expires_at", 0)
+
+        ttl_str = cls._format_readable_ttl(ttl_sec)
+        uses_str = cls._format_readable_uses(uses)
+        exp_dt = datetime.fromtimestamp(expires_at, tz=timezone.utc)
+        exp_str = exp_dt.strftime("%Y-%m-%d %H:%M UTC")
+
+        diff_summary = (
+            "+ НОВЫЙ КОД ДРУЖБЫ ДЛЯ ПОДКЛЮЧЕНИЯ\n"
+            f"+ Срок действия : {ttl_str} (до {exp_str})\n"
+            f"+ Лимит игроков : {uses_str}\n"
+            "+ Защита       : PBKDF2-HMAC-SHA256 (FCT1)"
+        )
+
+        return (
+            "<b>Код Дружбы успешно создан!</b>\n\n"
+            f'<pre><code class="language-diff">\n{diff_summary}\n</code></pre>\n\n'
+            "<b>Код подключения (нажмите для копирования):</b>\n"
+            f"<code>{html.escape(code)}</code>\n\n"
+            "<b>Пароль подключения:</b>\n"
+            f"<code>{html.escape(passphrase)}</code>\n\n"
+            "<blockquote>\n"
+            "<b>Инструкция для друга:</b>\n"
+            "1. Запустить лаунчер игры (клиент Vaultorio).\n"
+            "2. Вставить <b>Код Дружбы</b> и <b>Пароль</b> в форму подключения.\n"
+            "3. Нажать <b>«Подключиться»</b> для автоматической настройки и синхронизации сейва.\n"
+            "</blockquote>"
+        )
+
+    @staticmethod
+    def build_invite_success_keyboard() -> Dict[str, Any]:
+        """Builds action keyboard after invite code is generated."""
+        return {
+            "inline_keyboard": [
+                [
+                    {"text": "Создать еще один код", "callback_data": "action:prompt_invite"},
+                    {"text": "Назад в настройки", "callback_data": "menu:main"},
+                ]
+            ]
+        }
+
+    async def get_public_ip(self) -> str:
+        """Resolves server public IPv4 address with caching."""
+        if hasattr(self, "_cached_public_ip") and self._cached_public_ip:
+            return self._cached_public_ip
+
+        # 1. Environment variable override
+        env_ip = os.getenv("FACTORIO_PUBLIC_IP", "").strip()
+        if env_ip:
+            self._cached_public_ip = env_ip
+            return env_ip
+
+        # 2. Config host if explicitly set to public address
+        if self.config.http_host not in ("0.0.0.0", "127.0.0.1", "localhost", ""):
+            self._cached_public_ip = self.config.http_host
+            return self.config.http_host
+
+        # 3. Asynchronous HTTP detection via echo services
+        endpoints = ["https://api.ipify.org", "https://icanhazip.com", "https://ifconfig.me/ip"]
+        for ep in endpoints:
+            try:
+                resp = await self._client.get(ep, timeout=3.0)
+                if resp.status_code == 200:
+                    cand = resp.text.strip()
+                    parts = cand.split(".")
+                    if len(parts) == 4 and all(p.isdigit() and 0 <= int(p) <= 255 for p in parts):
+                        self._cached_public_ip = cand
+                        logger.info("Detected public server IP: %s", cand)
+                        return cand
+            except Exception:
+                continue
+
+        return "127.0.0.1"
+
+    async def generate_packaged_invite(
+        self,
+        ttl_seconds: int = 86400,
+        max_uses: int = 1,
+        note: str = "Telegram Bot Wizard",
+        passphrase: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Generates an authenticated invite ticket and packages it into an encrypted FCT1 invite code.
+        """
+        if not self.auth_manager:
+            raise RuntimeError("AuthManager is not configured on this server.")
+
+        public_ip = await self.get_public_ip()
+        hub_url = f"http://{public_ip}:{self.config.http_port}"
+        stun_host = public_ip
+        stun_port = self.config.udp_stun_port
+
+        invite_data = self.auth_manager.create_invite(
+            ttl_seconds=ttl_seconds,
+            max_uses=max_uses,
+            note=note,
+            created_by="telegram_bot",
+        )
+        ticket = invite_data["ticket"]
+        expires_at = int(invite_data["expires_at"])
+
+        if not passphrase:
+            passphrase = f"{secrets.randbelow(900000) + 100000}"
+
+        from src.common.invite_codec import encode_invite_code
+
+        invite_code = encode_invite_code(
+            hub_http_url=hub_url,
+            hub_stun_host=stun_host,
+            hub_stun_port=stun_port,
+            ticket=ticket,
+            expires_at=expires_at,
+            passphrase=passphrase,
+        )
+
+        return {
+            "invite_code": invite_code,
+            "passphrase": passphrase,
+            "expires_at": expires_at,
+            "ttl_seconds": ttl_seconds,
+            "max_uses": max_uses,
+            "ticket": ticket,
+            "hub_url": hub_url,
+            "stun_host": stun_host,
+            "stun_port": stun_port,
+        }
+
     def _is_user_authorized(self, user_id: int) -> bool:
         """Verifies if user has admin permission (if admin list is populated)."""
         if not self.settings.admin_user_ids:
@@ -918,10 +1146,18 @@ class TelegramBotService:
             await self.answer_callback_query(callback_query_id=cb_id, text="Статус обновлен!")
             return True
 
-        if cb_data == "menu:open":
+        if cb_data in ("menu:open", "menu:main", "wiz:back"):
             menu_text = self.format_settings_menu_html()
             menu_kb = self.build_settings_keyboard()
-            await self.send_message(text=menu_text, chat_id=chat_id, reply_markup=menu_kb)
+            if cb_data in ("menu:main", "wiz:back") and msg_id and chat_id:
+                await self.edit_message_text(
+                    message_id=msg_id,
+                    chat_id=chat_id,
+                    text=menu_text,
+                    reply_markup=menu_kb,
+                )
+            else:
+                await self.send_message(text=menu_text, chat_id=chat_id, reply_markup=menu_kb)
             await self.answer_callback_query(callback_query_id=cb_id)
             return True
 
@@ -993,30 +1229,92 @@ class TelegramBotService:
             return True
 
         if cb_data == "action:prompt_invite":
-            if self.auth_manager:
-                try:
-                    invite = self.auth_manager.create_invite(ttl_seconds=86400, note="Telegram Bot")
-                    ticket = invite.get("ticket", "")
-                    await self.send_message(
-                        chat_id=chat_id,
-                        text=(
-                            f"Новый Код Дружбы создан:\n"
-                            f"<code>{ticket}</code>\n\n"
-                            f"Срок действия: 24 часа. Одноразовый."
-                        ),
-                    )
-                    await self.answer_callback_query(callback_query_id=cb_id, text="Код Дружбы создан!")
-                except Exception as exc:
-                    logger.error("Failed to create invite via bot callback: %s", exc)
-                    await self.answer_callback_query(
-                        callback_query_id=cb_id,
-                        text="Ошибка создания кода",
-                        show_alert=True,
-                    )
-            else:
+            if not self.auth_manager:
                 await self.answer_callback_query(
                     callback_query_id=cb_id,
                     text="Управление билетами не активно (auth_manager не подключен).",
+                    show_alert=True,
+                )
+                return True
+
+            wizard_text = self.format_invite_wizard_html(selected_ttl=86400, selected_uses=1)
+            wizard_kb = self.build_invite_wizard_keyboard(selected_ttl=86400, selected_uses=1)
+            if msg_id and chat_id:
+                await self.edit_message_text(
+                    message_id=msg_id,
+                    chat_id=chat_id,
+                    text=wizard_text,
+                    reply_markup=wizard_kb,
+                )
+            else:
+                await self.send_message(
+                    chat_id=chat_id,
+                    text=wizard_text,
+                    reply_markup=wizard_kb,
+                )
+            await self.answer_callback_query(callback_query_id=cb_id)
+            return True
+
+        if cb_data.startswith("wiz:s:"):
+            parts = cb_data.split(":")
+            ttl = 86400
+            uses = 1
+            if len(parts) == 4:
+                try:
+                    ttl = int(parts[2])
+                    uses = int(parts[3])
+                except ValueError:
+                    pass
+            wizard_text = self.format_invite_wizard_html(selected_ttl=ttl, selected_uses=uses)
+            wizard_kb = self.build_invite_wizard_keyboard(selected_ttl=ttl, selected_uses=uses)
+            if msg_id and chat_id:
+                await self.edit_message_text(
+                    message_id=msg_id,
+                    chat_id=chat_id,
+                    text=wizard_text,
+                    reply_markup=wizard_kb,
+                )
+            await self.answer_callback_query(callback_query_id=cb_id)
+            return True
+
+        if cb_data.startswith("wiz:g:"):
+            parts = cb_data.split(":")
+            ttl = 86400
+            uses = 1
+            if len(parts) == 4:
+                try:
+                    ttl = int(parts[2])
+                    uses = int(parts[3])
+                except ValueError:
+                    pass
+
+            if not self.auth_manager:
+                await self.answer_callback_query(
+                    callback_query_id=cb_id,
+                    text="Управление билетами не активно.",
+                    show_alert=True,
+                )
+                return True
+
+            try:
+                invite_info = await self.generate_packaged_invite(ttl_seconds=ttl, max_uses=uses)
+                res_text = self.format_invite_success_html(invite_info)
+                res_kb = self.build_invite_success_keyboard()
+                if msg_id and chat_id:
+                    await self.edit_message_text(
+                        message_id=msg_id,
+                        chat_id=chat_id,
+                        text=res_text,
+                        reply_markup=res_kb,
+                    )
+                else:
+                    await self.send_message(chat_id=chat_id, text=res_text, reply_markup=res_kb)
+                await self.answer_callback_query(callback_query_id=cb_id, text="Код Дружбы успешно создан!")
+            except Exception as exc:
+                logger.error("Failed to create packaged invite: %s", exc)
+                await self.answer_callback_query(
+                    callback_query_id=cb_id,
+                    text=f"Ошибка генерации: {exc}",
                     show_alert=True,
                 )
             return True
@@ -1114,18 +1412,13 @@ class TelegramBotService:
             if not self._is_user_authorized(user_id):
                 await self.send_message(chat_id=chat_id, text="У вас нет прав для создания кодов.")
                 return True
-            if self.auth_manager:
-                try:
-                    invite = self.auth_manager.create_invite(ttl_seconds=86400, note="Telegram Bot")
-                    ticket = invite.get("ticket", "")
-                    await self.send_message(
-                        chat_id=chat_id,
-                        text=f"Код Дружбы: <code>{ticket}</code>\nДействует 24 часа.",
-                    )
-                except Exception as exc:
-                    await self.send_message(chat_id=chat_id, text=f"Ошибка создания кода: {exc}")
-            else:
+            if not self.auth_manager:
                 await self.send_message(chat_id=chat_id, text="Менеджер авторизации не подключен.")
+                return True
+
+            wizard_text = self.format_invite_wizard_html(selected_ttl=86400, selected_uses=1)
+            wizard_kb = self.build_invite_wizard_keyboard(selected_ttl=86400, selected_uses=1)
+            await self.send_message(chat_id=chat_id, text=wizard_text, reply_markup=wizard_kb)
             return True
 
         if cmd == "/set_key":

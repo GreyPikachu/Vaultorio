@@ -412,7 +412,9 @@ class TestTelegramBotServiceAsync(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(bot.settings.notify_host_start, initial_val)
 
     async def test_action_prompt_invite_with_auth_manager(self):
-        """Verifies 'action:prompt_invite' creates an invite ticket via AuthManager."""
+        """Verifies 'action:prompt_invite' opens wizard and 'wiz:g:...' creates encrypted FCT1 code."""
+        from src.common.invite_codec import decode_invite_code
+
         auth_mgr = AuthManager(config=self.config)
         bot = TelegramBotService(
             config=self.config,
@@ -422,19 +424,81 @@ class TestTelegramBotServiceAsync(unittest.IsolatedAsyncioTestCase):
         bot.settings.bot_token = "123:test"
         bot.settings.chat_id = 12345
 
+        # 1. Opening the wizard via action:prompt_invite
         cb_query = {
             "id": "cb_invite",
             "data": "action:prompt_invite",
             "from": {"id": 111},
             "message": {"message_id": 99, "chat": {"id": 12345}},
         }
-
         handled = await bot.handle_callback_query(cb_query)
         self.assertTrue(handled)
 
+        # 2. Selecting a parameter in wizard (wiz:s:7200:2)
+        cb_switch = {
+            "id": "cb_switch",
+            "data": "wiz:s:7200:2",
+            "from": {"id": 111},
+            "message": {"message_id": 99, "chat": {"id": 12345}},
+        }
+        handled_switch = await bot.handle_callback_query(cb_switch)
+        self.assertTrue(handled_switch)
+
+        # 3. Generating the code (wiz:g:7200:2)
+        cb_gen = {
+            "id": "cb_gen",
+            "data": "wiz:g:7200:2",
+            "from": {"id": 111},
+            "message": {"message_id": 99, "chat": {"id": 12345}},
+        }
+        handled_gen = await bot.handle_callback_query(cb_gen)
+        self.assertTrue(handled_gen)
+
         # Verify invite exists in AuthManager
         devices = auth_mgr.list_devices_and_invites()
-        self.assertEqual(len(devices.get("invites", [])), 1)
+        invites = devices.get("invites", [])
+        self.assertEqual(len(invites), 1)
+        self.assertEqual(invites[0]["max_uses"], 2)
+
+        # 4. Verify packaged code generation and decryptability
+        pkg = await bot.generate_packaged_invite(ttl_seconds=3600, max_uses=1)
+        self.assertTrue(pkg["invite_code"].startswith("FCT1-"))
+        self.assertTrue(len(pkg["passphrase"]) >= 6)
+
+        decoded = decode_invite_code(pkg["invite_code"], pkg["passphrase"])
+        self.assertEqual(decoded["ticket"], pkg["ticket"])
+        self.assertEqual(decoded["hub_http_url"], pkg["hub_url"])
+        self.assertEqual(decoded["hub_stun_port"], pkg["stun_port"])
+
+    def test_invite_wizard_zero_emojis(self):
+        """CRITICAL: Verifies invite wizard keyboards and templates contain strictly ZERO emojis."""
+        kb_wiz = TelegramBotService.build_invite_wizard_keyboard(selected_ttl=86400, selected_uses=1)
+        kb_succ = TelegramBotService.build_invite_success_keyboard()
+
+        for kb in (kb_wiz, kb_succ):
+            for row in kb.get("inline_keyboard", []):
+                for btn in row:
+                    text = btn.get("text", "")
+                    for char in text:
+                        cp = ord(char)
+                        self.assertFalse(
+                            0x1F300 <= cp <= 0x1FAFF
+                            or 0x2600 <= cp <= 0x27BF
+                            or 0xFE00 <= cp <= 0xFE0F
+                            or 0x1F900 <= cp <= 0x1F9FF,
+                            f"Forbidden emoji detected in wizard button: '{char}' in '{text}'",
+                        )
+
+        html_wiz = TelegramBotService.format_invite_wizard_html(86400, 1)
+        for char in html_wiz:
+            cp = ord(char)
+            self.assertFalse(
+                0x1F300 <= cp <= 0x1FAFF
+                or 0x2600 <= cp <= 0x27BF
+                or 0xFE00 <= cp <= 0xFE0F
+                or 0x1F900 <= cp <= 0x1F9FF,
+                f"Forbidden emoji detected in wizard HTML: '{char}'",
+            )
 
     async def test_handle_command_start_and_setup(self):
         """Verifies /start and /setup bind the chat_id and post welcome message."""
