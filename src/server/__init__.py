@@ -30,12 +30,18 @@ from src.server.ai_model_probe import (
 from src.server.session_manager import SessionLockManager, SessionState
 from src.server.storage import SaveStorageManager
 from src.server.stun_coordinator import StunCoordinatorProtocol, start_stun_coordinator
-from src.server.telegram_bot import TelegramBotService, TelegramBotSettings
+from src.server.telegram_bot import (
+    DASHBOARD_TIMEZONES,
+    TelegramBotService,
+    TelegramBotSettings,
+    format_tz_label,
+)
 
 __version__ = "0.1.0"
 __all__ = [
     "AuthError",
     "AuthManager",
+    "DASHBOARD_TIMEZONES",
     "DEFAULT_FREE_VISION_CANDIDATES",
     "InvalidInviteTicketError",
     "InviteTicketAlreadyUsedError",
@@ -50,6 +56,7 @@ __all__ = [
     "discover_openrouter_free_vision_models",
     "format_events_for_llm",
     "format_fallback_chronicle_post",
+    "format_tz_label",
     "get_logger",
     "load_server_config",
     "probe_vision_endpoint",

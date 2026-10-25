@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
 import html
 import json
@@ -44,6 +44,28 @@ AI_PERSONA_STYLES: List[Tuple[str, str]] = [
     ("friendly", "Дружеский обзор"),
 ]
 
+# Supported timezone offsets (hours from UTC) for cycling in /settings
+DASHBOARD_TIMEZONES: List[Tuple[int, str]] = [
+    (0, "UTC (0)"),
+    (2, "UTC+2 (КЛД)"),
+    (3, "UTC+3 (МСК)"),
+    (4, "UTC+4 (СМР)"),
+    (5, "UTC+5 (ЕКБ)"),
+    (6, "UTC+6 (ОМСК)"),
+    (7, "UTC+7 (НСК)"),
+    (8, "UTC+8 (ИРК)"),
+    (9, "UTC+9 (ЯКТ)"),
+    (10, "UTC+10 (ВЛД)"),
+]
+
+
+def format_tz_label(offset_hours: int) -> str:
+    """Returns human-readable UTC offset label, e.g. 'UTC', 'UTC+3', or 'UTC-4'."""
+    if offset_hours == 0:
+        return "UTC"
+    sign = "+" if offset_hours > 0 else ""
+    return f"UTC{sign}{offset_hours}"
+
 
 @dataclass
 class TelegramBotSettings:
@@ -59,6 +81,8 @@ class TelegramBotSettings:
     dashboard_title: str = "Factorio Server - Live Status"
     live_dashboard_enabled: bool = True
     show_ping_in_dashboard: bool = True
+    show_updated_time: bool = True
+    dashboard_tz_offset: int = 3
 
     # Notification forwarding toggles
     notify_host_start: bool = True
@@ -86,9 +110,17 @@ class TelegramBotSettings:
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "TelegramBotSettings":
-        """Instantiates settings from a dictionary, ignoring unknown keys."""
+        """Instantiates settings from a dictionary, validating and clamping fields."""
         valid_keys = {f.name for f in cls.__dataclass_fields__.values()}
         filtered = {k: v for k, v in data.items() if k in valid_keys}
+        if "dashboard_tz_offset" in filtered:
+            try:
+                offset_val = int(filtered["dashboard_tz_offset"])
+                filtered["dashboard_tz_offset"] = max(-12, min(14, offset_val))
+            except (ValueError, TypeError):
+                filtered["dashboard_tz_offset"] = 3
+        if "show_updated_time" in filtered:
+            filtered["show_updated_time"] = bool(filtered["show_updated_time"])
         return cls(**filtered)
 
     def save(self, file_path: Path) -> None:
@@ -142,6 +174,15 @@ class TelegramBotSettings:
             if env_or_key:
                 instance.openrouter_api_key = env_or_key
                 logger.info("Using openrouter_api_key from FACTORIO_OPENROUTER_API_KEY environment variable.")
+
+        env_tz = os.getenv("FACTORIO_TG_TZ_OFFSET", "").strip()
+        if env_tz:
+            try:
+                val = int(env_tz)
+                instance.dashboard_tz_offset = max(-12, min(14, val))
+                logger.info("Using dashboard_tz_offset from FACTORIO_TG_TZ_OFFSET environment variable.")
+            except ValueError:
+                pass
 
         return instance
 
@@ -206,6 +247,20 @@ class TelegramBotService:
     def save_settings(self) -> None:
         """Persists current settings to disk."""
         self.settings.save(self.state_file)
+
+    def format_time_with_tz(
+        self,
+        dt: Optional[datetime] = None,
+        fmt: str = "%H:%M:%S",
+    ) -> str:
+        """
+        Formats a datetime in the configured dashboard_tz_offset timezone.
+        Appends human-readable UTC offset label (e.g. '17:30:00 UTC+3').
+        """
+        offset = max(-12, min(14, int(self.settings.dashboard_tz_offset)))
+        tz = timezone(timedelta(hours=offset))
+        target_dt = dt.astimezone(tz) if dt is not None else datetime.now(tz)
+        return f"{target_dt.strftime(fmt)} {format_tz_label(offset)}"
 
     async def close(self) -> None:
         """Stops background tasks and releases HTTP client resources."""
@@ -734,8 +789,9 @@ class TelegramBotService:
             else:
                 lines.append("Мир в сейфе: нет активного сохранения")
 
-        utc_now = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
-        lines.append(f"\n<i>Обновлено: {utc_now}</i>")
+        if self.settings.show_updated_time:
+            now_str = self.format_time_with_tz(fmt="%H:%M:%S")
+            lines.append(f"\n<i>Обновлено: {now_str}</i>")
 
         return "\n".join(lines)
 
@@ -781,8 +837,9 @@ class TelegramBotService:
         text = self.format_dashboard_html()
         keyboard = self.build_dashboard_keyboard()
 
-        # Deduplicate using content hash
-        content_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        # Deduplicate using content hash (excluding timestamp to prevent ticking second spam)
+        hash_source = re.sub(r"\n?<i>Обновлено:.*?</i>", "", text, flags=re.DOTALL)
+        content_hash = hashlib.sha256(hash_source.encode("utf-8")).hexdigest()
         structural_hash = self._get_dashboard_structural_hash(text)
         now_mono = time.monotonic()
 
@@ -918,6 +975,11 @@ class TelegramBotService:
         # Schedule mode label lookup
         curr_sched = dict(AI_SCHEDULE_MODES).get(self.settings.ai_schedule_mode, "Каждый час")
         curr_style = dict(AI_PERSONA_STYLES).get(self.settings.ai_persona_style, "Репортер")
+        tz_map = dict(DASHBOARD_TIMEZONES)
+        curr_tz_label = tz_map.get(
+            self.settings.dashboard_tz_offset,
+            format_tz_label(self.settings.dashboard_tz_offset),
+        )
 
         keyboard: List[List[Dict[str, str]]] = [
             # Notification forwarding toggles
@@ -961,6 +1023,16 @@ class TelegramBotService:
                 {
                     "text": toggle_label("Пинг в закрепе", self.settings.show_ping_in_dashboard),
                     "callback_data": "toggle:show_ping_in_dashboard",
+                },
+            ],
+            [
+                {
+                    "text": toggle_label("Время обновления", self.settings.show_updated_time),
+                    "callback_data": "toggle:show_updated_time",
+                },
+                {
+                    "text": f"Пояс: {curr_tz_label}",
+                    "callback_data": "cycle:dashboard_tz_offset",
                 },
             ],
             # AI Chronicle settings
@@ -1148,7 +1220,11 @@ class TelegramBotService:
         )
 
     @classmethod
-    def format_invite_success_html(cls, invite_info: Dict[str, Any]) -> str:
+    def format_invite_success_html(
+        cls,
+        invite_info: Dict[str, Any],
+        tz_offset: int = 3,
+    ) -> str:
         """Formats generated invite code with single clean copyable pre block."""
         code = invite_info.get("invite_code", "")
         passphrase = invite_info.get("passphrase", "")
@@ -1158,8 +1234,11 @@ class TelegramBotService:
 
         ttl_str = cls._format_readable_ttl(ttl_sec)
         uses_str = cls._format_readable_uses(uses)
-        exp_dt = datetime.fromtimestamp(expires_at, tz=timezone.utc)
-        exp_str = exp_dt.strftime("%Y-%m-%d %H:%M UTC")
+        offset = max(-12, min(14, int(tz_offset)))
+        tz = timezone(timedelta(hours=offset))
+        exp_dt = datetime.fromtimestamp(expires_at, tz=tz)
+        tz_lbl = format_tz_label(offset)
+        exp_str = f"{exp_dt.strftime('%Y-%m-%d %H:%M')} {tz_lbl}"
 
         return (
             "<b>Код Дружбы успешно создан!</b>\n\n"
@@ -1366,8 +1445,8 @@ class TelegramBotService:
                             reply_markup=self.build_settings_keyboard(),
                         )
 
-                    # Trigger dashboard update if live dashboard was re-enabled or ping setting toggled
-                    if (field_name == "live_dashboard_enabled" and new_val) or (field_name == "show_ping_in_dashboard"):
+                    # Trigger dashboard update if live dashboard was re-enabled or ping/updated_time setting toggled
+                    if (field_name == "live_dashboard_enabled" and new_val) or (field_name in ("show_ping_in_dashboard", "show_updated_time")):
                         await self.update_dashboard(force=True)
 
                     status_str = "ВКЛ" if new_val else "ВЫКЛ"
@@ -1391,6 +1470,13 @@ class TelegramBotService:
                 next_style = styles[(curr_idx + 1) % len(styles)]
                 self.settings.ai_persona_style = next_style
                 self.save_settings()
+            elif field_name == "dashboard_tz_offset":
+                offsets = [item[0] for item in DASHBOARD_TIMEZONES]
+                curr_idx = offsets.index(self.settings.dashboard_tz_offset) if self.settings.dashboard_tz_offset in offsets else 0
+                next_offset = offsets[(curr_idx + 1) % len(offsets)]
+                self.settings.dashboard_tz_offset = next_offset
+                self.save_settings()
+                await self.update_dashboard(force=True)
 
             if msg_id and chat_id:
                 await self.edit_message_text(
@@ -1586,7 +1672,10 @@ class TelegramBotService:
                     max_uses=uses,
                     passphrase=state.get("passphrase"),
                 )
-                res_text = self.format_invite_success_html(invite_info)
+                res_text = self.format_invite_success_html(
+                    invite_info,
+                    tz_offset=self.settings.dashboard_tz_offset,
+                )
                 res_kb = self.build_invite_success_keyboard(invite_code=invite_info["invite_code"])
                 if msg_id and chat_id:
                     await self.edit_message_text(
@@ -2037,6 +2126,40 @@ class TelegramBotService:
             )
             return True
 
+        if cmd == "/set_tz":
+            if not self._is_user_authorized(user_id):
+                await self.send_message(chat_id=chat_id, text="У вас нет прав администратора.")
+                return True
+
+            offset_val: Optional[int] = None
+            if args:
+                try:
+                    val = int(args.lstrip("+"))
+                    if -12 <= val <= 14:
+                        offset_val = val
+                except ValueError:
+                    pass
+
+            if offset_val is None:
+                await self.send_message(
+                    chat_id=chat_id,
+                    text=(
+                        "Использование: <code>/set_tz +3</code>\n"
+                        "Допустимо целое смещение от -12 до +14 часов от UTC."
+                    ),
+                )
+                return True
+
+            self.settings.dashboard_tz_offset = offset_val
+            self.save_settings()
+            await self.update_dashboard(force=True)
+            lbl = format_tz_label(offset_val)
+            await self.send_message(
+                chat_id=chat_id,
+                text=f"<b>[НАСТРОЙКИ]</b> Часовой пояс обновлен: <b>{lbl}</b>",
+            )
+            return True
+
         return False
 
     # --------------------------------------------------------------------------
@@ -2055,6 +2178,7 @@ class TelegramBotService:
             {"command": "ping", "description": "Пинг игроков и режим сети (P2P / Relay)"},
             {"command": "status", "description": "Текущий статус игрового сервера"},
             {"command": "settings", "description": "Интерактивное меню настроек"},
+            {"command": "set_tz", "description": "Установить часовой пояс (от -12 до +14)"},
             {"command": "invite", "description": "Создать Код Дружбы"},
             {"command": "myid", "description": "Узнать свой Telegram ID"},
             {"command": "admin", "description": "Управление администраторами"},
