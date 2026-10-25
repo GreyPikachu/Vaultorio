@@ -166,12 +166,24 @@ class HubClient:
             data.setdefault("current_host", session.get("host_name"))
             data.setdefault("save_exists", save.get("exists", False))
             data.setdefault("save_metadata", save)
+            data.setdefault("world_name", save.get("world_name"))
+            data.setdefault("display_world_name", save.get("display_world_name"))
             if "mod_list" not in data or data["mod_list"] is None:
                 data["mod_list"] = save.get("mod_list")
 
             return data
         except Exception as e:
             logger.error(f"Ошибка при получении статуса сервера: {e}")
+            raise
+
+    def get_server_worlds(self) -> dict[str, Any]:
+        """Возвращает список всех сохраненных и архивных миров с сервера."""
+        try:
+            resp = self._client.get("/worlds")
+            resp.raise_for_status()
+            return resp.json()
+        except Exception as e:
+            logger.error(f"Ошибка при получении списка миров с сервера: {e}")
             raise
 
     def wait_if_uploading_final(
@@ -394,6 +406,7 @@ class HubClient:
             - 'mods_mismatch': list[str] (список отсутствующих активных модов)
         """
         # Шаг 1: Восстановление файла, если прошлый сеанс был в роли Гостя
+        had_guest_stash = (env.cloud_stash_dir / env.cloud_save_name).is_file()
         env.restore_hidden_cloud_save()
 
         # Шаг 2: Проверка статуса сервера
@@ -404,6 +417,20 @@ class HubClient:
 
         if not save_exists or not server_sha:
             logger.info("На сервере еще нет облачного сохранения (первый запуск карты).")
+            local_save_path = env.saves_dir / env.cloud_save_name
+            if not had_guest_stash and local_save_path.is_file():
+                env.cloud_stash_dir.mkdir(parents=True, exist_ok=True)
+                backup_local = env.cloud_stash_dir / "cloud_world_prev_local.zip"
+                try:
+                    shutil.move(str(local_save_path), str(backup_local))
+                    logger.info(
+                        f"На сервере не выбран активный мир (сейф пуст). "
+                        f"Предыдущий локальный cloud_world.zip перемещен в .cloud_stash/{backup_local.name}"
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"Не удалось переместить устаревший локальный {local_save_path.name}: {e}"
+                    )
             return {
                 "action": "no_server_save",
                 "updated": False,
@@ -583,6 +610,7 @@ class HubClient:
         mod_list: Optional[list[dict[str, Any]]] = None,
         max_retries: int = 3,
         progress_callback: Optional[Callable[[int, int, float], None]] = None,
+        world_name: Optional[str] = None,
     ) -> dict[str, Any]:
         """Выгружает файл сохранения на сервер-сейф с защитой от Split-Brain.
 
@@ -638,6 +666,8 @@ class HubClient:
                         "release_on_success": "true" if release_on_success else "false",
                         "release_host": "true" if release_on_success else "false",
                     }
+                    if world_name:
+                        data["world_name"] = str(world_name).strip()
                     if mod_list_json:
                         data["mod_list_json"] = mod_list_json
 

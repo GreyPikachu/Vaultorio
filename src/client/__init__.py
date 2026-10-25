@@ -38,7 +38,11 @@ from src.client.session_orchestrator import (
     RoleType,
     SessionOrchestrator,
 )
-from src.client.setup_gui import FirstRunSetupWindow, run_first_time_setup_gui
+from src.client.setup_gui import (
+    FirstRunSetupWindow,
+    publish_selected_world_to_server,
+    run_first_time_setup_gui,
+)
 from src.client.ui_notifier import copy_to_clipboard, show_role_banner
 
 __all__ = [
@@ -68,6 +72,7 @@ __all__ = [
     "is_control_packet",
     "main",
     "parse_data_packet",
+    "publish_selected_world_to_server",
     "run_first_time_setup_gui",
     "setup_client_logging",
     "show_role_banner",

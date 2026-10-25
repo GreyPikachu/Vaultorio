@@ -41,6 +41,7 @@ def publish_selected_world_to_server(
     player_name: str = "Player",
     save_path: Optional[Path | str] = None,
     on_progress: Optional[Callable[[int, int, float], None]] = None,
+    world_name: Optional[str] = None,
 ) -> dict[str, Any]:
     """Публикует выбранный локальный мир на сервер в качестве нового cloud_world.zip.
 
@@ -120,6 +121,8 @@ def publish_selected_world_to_server(
         "release_on_success": True,
         "mod_list": env.get_active_mods_manifest(),
     }
+    if world_name is not None:
+        upload_kwargs["world_name"] = str(world_name).strip()
     if on_progress is not None:
         upload_kwargs["progress_callback"] = on_progress
 
@@ -208,6 +211,14 @@ class FirstRunSetupWindow:
         self.auto_connect = bool(auto_connect and self.is_already_configured)
 
         self.server_has_save: Optional[bool] = None
+        self.server_state: str = "idle"
+        self.server_host_name: Optional[str] = None
+        self.server_guests_count: int = 0
+        self.server_world_name: Optional[str] = None
+        self.server_world_display: Optional[str] = None
+        self.server_world_version: Optional[int] = None
+        self.server_world_size_mb: Optional[float] = None
+        self.server_status_lbl: Optional[Any] = None
         self.inputs_card: Optional[Any] = None
         self.world_card: Optional[Any] = None
         self.world_title_lbl: Optional[Any] = None
@@ -218,7 +229,7 @@ class FirstRunSetupWindow:
             try:
                 hub_client = HubClient(config=self.existing_config, http_client=self.http_client)
                 st = hub_client.get_status(timeout=5.0)
-                self.server_has_save = bool(st.get("save_exists") or st.get("save", {}).get("exists"))
+                self._apply_server_status_dict(st)
             except Exception as e:
                 logger.debug(f"Не удалось получить статус сервера при открытии окна: {e}")
                 self.server_has_save = True
@@ -250,6 +261,117 @@ class FirstRunSetupWindow:
         self._configure_dark_theme()
         self._init_window()
         self._build_ui()
+
+    def _apply_server_status_dict(self, st: dict[str, Any]) -> None:
+        """Обновляет внутренние поля статуса сервера и активного сохранения из ответа /status."""
+        session = st.get("session") or {}
+        save = st.get("save") or st.get("save_metadata") or {}
+
+        self.server_has_save = bool(st.get("save_exists") or save.get("exists", False))
+        self.server_state = str(st.get("state") or session.get("state") or "idle")
+        self.server_host_name = st.get("current_host") or session.get("host_name")
+        guests = st.get("active_guests") or session.get("active_guests") or []
+        self.server_guests_count = len(guests) if isinstance(guests, list) else 0
+
+        w_name = st.get("world_name") or save.get("world_name")
+        disp_name = st.get("display_world_name") or save.get("display_world_name")
+        if w_name:
+            self.server_world_name = str(w_name)
+            self.server_world_display = str(disp_name) if disp_name else f"{self.server_world_name} [Cloud]"
+        elif disp_name:
+            self.server_world_name = "cloud_world" if self.server_has_save else None
+            self.server_world_display = str(disp_name)
+        else:
+            self.server_world_name = "cloud_world" if self.server_has_save else None
+            self.server_world_display = None
+        self.server_world_version = save.get("version_counter") or st.get("version_counter")
+        size_b = save.get("size_bytes") or 0
+        self.server_world_size_mb = round(size_b / (1024 * 1024), 1) if size_b else None
+
+    def _format_server_status_banner(self) -> tuple[str, str]:
+        """Возвращает кортеж (текст, цвет) для отображения статуса сервера в player_card."""
+        if not self.is_already_configured:
+            return ("Статус сервера: ожидание подключения по Коду Дружбы", COLOR_TEXT_MUTED)
+
+        state = self.server_state
+        host = self.server_host_name or "Игрок"
+        guests = self.server_guests_count
+
+        if state == "idle":
+            return ("Статус сервера: [Свободен] — можно запускать игру (вы станете Хостом)", COLOR_SUCCESS)
+        elif state == "claiming":
+            return (f"Статус сервера: [Подготовка лобби...] Хост: {host}", COLOR_ACCENT)
+        elif state == "hosting_active":
+            return (f"Статус сервера: [В игре!] Хост: {host} (гостей: {guests}) — вы войдете как Гость", COLOR_INFO)
+        elif state == "uploading_final":
+            return (f"Статус сервера: [Сохранение мира в сейф...] Хост: {host}", COLOR_ACCENT)
+        else:
+            return (f"Статус сервера: [{state}]", COLOR_TEXT_MUTED)
+
+    def _format_world_title(self) -> str:
+        """Формирует текст заголовка карточки мира в зависимости от статуса сервера."""
+        if self.server_has_save is False:
+            if self.step == "select_initial_world":
+                return "На сервере еще нет сохраненного мира. Выберите ваш мир для загрузки:"
+            return "Активный мир на сервере: Не выбран (слот пуст — выберите мир для загрузки):"
+
+        if self.server_world_display:
+            if self.server_world_version and self.server_world_size_mb is not None:
+                return f"Активный мир на сервере: {self.server_world_display} (v{self.server_world_version}, {self.server_world_size_mb} МБ)"
+            return f"Активный мир на сервере: {self.server_world_display}"
+        return "Активный мир на сервере:"
+
+    def _update_server_status_widgets(self) -> None:
+        """Обновляет виджеты статуса сервера и названия мира в UI."""
+        if hasattr(self, "server_status_lbl") and self.server_status_lbl is not None:
+            text, color = self._format_server_status_banner()
+            try:
+                self.server_status_lbl.config(text=text, fg=color)
+            except Exception:
+                pass
+
+        if hasattr(self, "world_title_lbl") and self.world_title_lbl is not None:
+            try:
+                self.world_title_lbl.config(text=self._format_world_title())
+            except Exception:
+                pass
+
+        if hasattr(self, "archive_world_btn") and self.archive_world_btn is not None:
+            try:
+                if self.is_already_configured and self.server_has_save:
+                    self.archive_world_btn.pack(side=self.tk.LEFT)
+                    if self.server_state != "idle":
+                        self.archive_world_btn.config(state="disabled")
+                    else:
+                        self.archive_world_btn.config(state="normal")
+                else:
+                    self.archive_world_btn.pack_forget()
+            except Exception:
+                pass
+
+    def _on_refresh_status_click(self) -> None:
+        """Обрабатывает нажатие кнопки обновления статуса сервера."""
+        if self.is_activating:
+            return
+        if not self.is_already_configured or not self.existing_config:
+            return
+
+        self.set_status("Опрос сервера...", color=COLOR_INFO)
+
+        def _worker():
+            try:
+                hub_client = HubClient(config=self.existing_config, http_client=self.http_client)
+                st = hub_client.get_status(timeout=5.0)
+                self._apply_server_status_dict(st)
+                self._schedule_ui(lambda: (
+                    self._update_server_status_widgets(),
+                    self.set_status("Статус сервера обновлен.", color=COLOR_SUCCESS),
+                ))
+            except Exception as e:
+                logger.warning(f"Ошибка обновления статуса сервера: {e}")
+                self._schedule_ui(lambda err=e: self.set_status(f"Ошибка связи: {err}", color=COLOR_ERROR))
+
+        threading.Thread(target=_worker, daemon=True, name="RefreshStatusThread").start()
 
     def _configure_dark_theme(self) -> None:
         """Настраивает кроссплатформенный темный стиль виджетов через тему 'clam'."""
@@ -594,7 +716,7 @@ class FirstRunSetupWindow:
             )
             prompt_lbl.pack(anchor="w")
 
-        # 2. Информационный блок игрока
+        # 2. Информационный блок игрока и статуса сервера
         player_card = tk.Frame(
             main_container,
             bg=COLOR_CARD,
@@ -605,14 +727,38 @@ class FirstRunSetupWindow:
         )
         player_card.pack(fill=tk.X, pady=(0, 10))
 
+        player_row = tk.Frame(player_card, bg=COLOR_CARD)
+        player_row.pack(fill=tk.X)
+
         player_title_lbl = tk.Label(
-            player_card,
+            player_row,
             text=f"Игрок: {self.player_name}",
             font=("Helvetica", 10, "bold"),
             fg=COLOR_ACCENT,
             bg=COLOR_CARD,
         )
-        player_title_lbl.pack(anchor="w")
+        player_title_lbl.pack(side=tk.LEFT)
+
+        if self.is_already_configured:
+            self.refresh_btn = ttk.Button(
+                player_row,
+                text="Обновить статус",
+                style="Secondary.TButton",
+                command=self._on_refresh_status_click,
+            )
+            self.refresh_btn.pack(side=tk.RIGHT)
+
+        status_text, status_color = self._format_server_status_banner()
+        self.server_status_lbl = tk.Label(
+            player_card,
+            text=status_text,
+            font=("Helvetica", 9),
+            fg=status_color,
+            bg=COLOR_CARD,
+            wraplength=480,
+            justify="left",
+        )
+        self.server_status_lbl.pack(anchor="w", pady=(3, 0))
 
         # 3. Секция выбора активного мира сервера
         self.world_card = tk.Frame(
@@ -624,11 +770,7 @@ class FirstRunSetupWindow:
             pady=8,
         )
 
-        world_title = (
-            "На сервере еще нет сохраненного мира. Выберите ваш мир для загрузки:"
-            if self.server_has_save is False
-            else "Активный мир на сервере:"
-        )
+        world_title = self._format_world_title()
         self.world_title_lbl = tk.Label(
             self.world_card,
             text=world_title,
@@ -678,6 +820,8 @@ class FirstRunSetupWindow:
         )
         if self.is_already_configured and self.server_has_save:
             self.archive_world_btn.pack(side=tk.LEFT)
+            if self.server_state != "idle":
+                self.archive_world_btn.config(state="disabled")
 
         self.world_hint_lbl = tk.Label(
             self.world_card,
@@ -1005,11 +1149,7 @@ class FirstRunSetupWindow:
             self.inputs_card.pack(fill=self.tk.X, pady=(0, 10))
         if self.world_card:
             self.world_card.pack(fill=self.tk.X, pady=(0, 10))
-        if hasattr(self, "archive_world_btn"):
-            if self.server_has_save:
-                self.archive_world_btn.pack(side=tk.LEFT)
-            else:
-                self.archive_world_btn.pack_forget()
+        self._update_server_status_widgets()
         self.action_btn.config(
             text="Применить и запустить игру",
             style="Accent.TButton",
@@ -1023,7 +1163,8 @@ class FirstRunSetupWindow:
             hub_client = HubClient(config=self.existing_config, http_client=self.http_client)
             # Щедрый таймаут 20 секунд для нестабильного Wi-Fi
             st = hub_client.get_status(timeout=20.0)
-            self.server_has_save = bool(st.get("save_exists") or st.get("save", {}).get("exists"))
+            self._apply_server_status_dict(st)
+            self._schedule_ui(self._update_server_status_widgets)
 
             if self.step != "auto_connect":
                 return
@@ -1448,7 +1589,14 @@ class FirstRunSetupWindow:
                 source_save_path=save_path,
                 player_name=self.player_name,
                 on_progress=self._on_upload_progress_from_worker,
+                world_name=save_path.stem,
             )
+            try:
+                st = hub_client.get_status(timeout=5.0)
+                self._apply_server_status_dict(st)
+                self._schedule_ui(self._update_server_status_widgets)
+            except Exception:
+                pass
             self.result_config = cfg
             self._schedule_ui(self._on_publish_success)
         except Exception as exc:
@@ -1582,9 +1730,11 @@ class FirstRunSetupWindow:
             hub_client = HubClient(config=cfg, http_client=self.http_client)
             # 1. Проверяем статус сервера
             st = hub_client.get_status(timeout=10.0)
-            state = st.get("state") or st.get("session", {}).get("state", "idle")
+            self._apply_server_status_dict(st)
+            self._schedule_ui(self._update_server_status_widgets)
+            state = self.server_state
             if state != "idle":
-                current_host = st.get("current_host") or st.get("session", {}).get("host_name") or "другой игрок"
+                current_host = self.server_host_name or "другой игрок"
                 raise RuntimeError(
                     f"Сейчас на сервере играет {current_host}. Снять мир можно только когда сервер свободен."
                 )
@@ -1595,7 +1745,10 @@ class FirstRunSetupWindow:
                     lambda: self.set_status("Скачивание копии мира в локальные сохранения...", color=COLOR_INFO)
                 )
                 ts_str = datetime.now().strftime("%Y-%m-%d_%H-%M")
-                saved_local_name = f"cloud_world_предыдущий_глобальный_сервер_{ts_str}.zip"
+                if self.server_world_name and self.server_world_name != "cloud_world":
+                    saved_local_name = f"{self.server_world_name}_архив_сервера_{ts_str}.zip"
+                else:
+                    saved_local_name = f"cloud_world_предыдущий_глобальный_сервер_{ts_str}.zip"
                 dest_path = self.env.saves_dir / saved_local_name
                 self.env.saves_dir.mkdir(parents=True, exist_ok=True)
                 hub_client.download_save(dest_path)
@@ -1607,6 +1760,8 @@ class FirstRunSetupWindow:
             logger.info(f"Серверный мир архивирован: {res}")
 
             self.server_has_save = False
+            self.server_world_name = None
+            self.server_world_display = None
 
             # Обновляем локальный список сохранений
             local_saves = []
@@ -1738,7 +1893,9 @@ class FirstRunSetupWindow:
             try:
                 hub_client = HubClient(config=cfg, http_client=self.http_client)
                 st = hub_client.get_status()
-                server_has_save = bool(st.get("save_exists") or st.get("save", {}).get("exists"))
+                self._apply_server_status_dict(st)
+                self._schedule_ui(self._update_server_status_widgets)
+                server_has_save = self.server_has_save
             except Exception as st_err:
                 logger.warning(f"Не удалось проверить статус сохранения на сервере: {st_err}")
 
