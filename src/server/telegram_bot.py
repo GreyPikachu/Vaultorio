@@ -1640,6 +1640,13 @@ class TelegramBotService:
                 self.save_settings()
                 logger.info("Auto-registered user %d as primary bot administrator.", user_id)
 
+            if cmd == "/setup" and self.settings.admin_user_ids and not self._is_user_authorized(user_id):
+                await self.send_message(
+                    chat_id=chat_id,
+                    text="У вас нет прав администратора для перепривязки чата бота.",
+                )
+                return True
+
             # Bind chat_id to current chat if not bound or explicitly requested via /setup
             if not self.settings.chat_id or cmd == "/setup":
                 self.settings.chat_id = chat_id

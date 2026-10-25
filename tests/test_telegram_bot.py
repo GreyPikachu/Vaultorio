@@ -694,6 +694,17 @@ class TestTelegramBotServiceAsync(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(handled)
         self.assertEqual(bot.settings.chat_id, -100555444)
 
+        # Non-admin cannot hijack and rebind via /setup
+        msg_hijack = {
+            "message_id": 11,
+            "chat": {"id": -100999888},
+            "from": {"id": 999},  # not an admin
+            "text": "/setup",
+        }
+        handled_hijack = await bot.handle_message(msg_hijack)
+        self.assertTrue(handled_hijack)
+        self.assertEqual(bot.settings.chat_id, -100555444)  # Still bound to original chat
+
     async def test_handle_command_set_key_deletes_secret_message(self):
         """
         CRITICAL SECURITY TEST: /set_key saves OpenRouter key and deletes the incoming
