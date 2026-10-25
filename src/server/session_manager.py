@@ -430,13 +430,19 @@ class SessionLockManager:
 
             return {"success": True, "status": self.get_public_status()}
 
-    def heartbeat(self, session_token: str, host_udp_port: Optional[int] = None) -> Dict[str, Any]:
+    def heartbeat(
+        self,
+        session_token: str,
+        host_udp_port: Optional[int] = None,
+        guests_metrics: Optional[List[Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
         """
         Refreshes the lease timestamp for the active host.
 
         Args:
             session_token: Secret token issued during claim_host.
             host_udp_port: Optional updated external UDP port.
+            guests_metrics: Optional list of connected guest network metrics.
 
         Returns:
             Dict[str, Any]: Operation outcome and active guest list.
@@ -452,9 +458,47 @@ class SessionLockManager:
                 logger.warning("heartbeat rejected: session is in state '%s'", self._session.state)
                 return {"success": False, "reason": "not_hosting", "status": self.get_public_status()}
 
-            self._session.last_seen = time.time()
+            now = time.time()
+            self._session.last_seen = now
             if host_udp_port is not None and (1 <= host_udp_port <= 65535):
                 self._session.host_udp_port = host_udp_port
+
+            if guests_metrics is not None:
+                for metric in guests_metrics:
+                    if not isinstance(metric, dict):
+                        continue
+                    name = str(metric.get("name") or "").strip()
+                    if not name:
+                        continue
+
+                    raw_ping = metric.get("ping_ms")
+                    ping_val: Optional[float] = None
+                    if isinstance(raw_ping, (int, float)) and 0.0 <= float(raw_ping) <= 9999.0:
+                        ping_val = round(float(raw_ping), 1)
+
+                    direct_p2p = bool(metric.get("direct_p2p", True))
+                    mode = str(metric.get("mode") or ("P2P" if direct_p2p else "Relay"))
+
+                    found = False
+                    for guest in self._session.active_guests:
+                        if guest.get("name") == name:
+                            guest["ping_ms"] = ping_val
+                            guest["direct_p2p"] = direct_p2p
+                            guest["mode"] = mode
+                            guest["last_seen"] = now
+                            found = True
+                            break
+
+                    if not found:
+                        self._session.active_guests.append({
+                            "name": name,
+                            "public_ip": None,
+                            "udp_port": None,
+                            "last_seen": now,
+                            "ping_ms": ping_val,
+                            "direct_p2p": direct_p2p,
+                            "mode": mode,
+                        })
 
             self._persist_status_locked()
             logger.debug("Received heartbeat from host '%s'", self._session.host_name)
@@ -573,6 +617,9 @@ class SessionLockManager:
                     guest["public_ip"] = guest_public_ip
                     guest["udp_port"] = guest_udp_port
                     guest["last_seen"] = time.time()
+                    guest.setdefault("ping_ms", None)
+                    guest.setdefault("direct_p2p", True)
+                    guest.setdefault("mode", "P2P")
                     updated = True
                     break
 
@@ -582,6 +629,9 @@ class SessionLockManager:
                     "public_ip": guest_public_ip,
                     "udp_port": guest_udp_port,
                     "last_seen": time.time(),
+                    "ping_ms": None,
+                    "direct_p2p": True,
+                    "mode": "P2P",
                 })
 
             self._persist_status_locked()

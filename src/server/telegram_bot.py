@@ -14,6 +14,7 @@ import html
 import json
 import os
 from pathlib import Path
+import re
 import secrets
 import time
 from typing import Any, Dict, List, Optional, Tuple
@@ -57,6 +58,7 @@ class TelegramBotSettings:
     pinned_message_id: Optional[int] = None
     dashboard_title: str = "Factorio Server - Live Status"
     live_dashboard_enabled: bool = True
+    show_ping_in_dashboard: bool = True
 
     # Notification forwarding toggles
     notify_host_start: bool = True
@@ -183,6 +185,8 @@ class TelegramBotService:
         self._owns_client = client is None
 
         self._last_dashboard_hash: Optional[str] = None
+        self._last_dashboard_structural_hash: Optional[str] = None
+        self._last_dashboard_edit_ts: float = 0.0
         self._polling_task: Optional[asyncio.Task] = None
         self._dashboard_timer_task: Optional[asyncio.Task] = None
         self._is_polling = False
@@ -692,8 +696,29 @@ class TelegramBotService:
                 lines.append(f"Время в игре: {hours} ч {minutes} мин")
 
         if guests:
-            guest_names = [html.escape(str(g.get("name", "Игрок"))) for g in guests]
-            lines.append(f"Гости ({len(guests)}): {', '.join(guest_names)}")
+            has_metrics = any(
+                ("ping_ms" in g or "direct_p2p" in g or "mode" in g)
+                for g in guests
+            )
+            if not self.settings.show_ping_in_dashboard or not has_metrics:
+                guest_names = [html.escape(str(g.get("name", "Игрок"))) for g in guests]
+                lines.append(f"Гости ({len(guests)}): {', '.join(guest_names)}")
+            else:
+                lines.append(f"Гости ({len(guests)}):")
+                for g in guests:
+                    g_name = html.escape(str(g.get("name", "Игрок")))
+                    direct = g.get("direct_p2p", True)
+                    raw_mode = g.get("mode")
+                    g_mode = "Relay" if (raw_mode == "Relay" or not direct) else "P2P"
+                    ping_val = g.get("ping_ms")
+                    if ping_val is not None:
+                        try:
+                            ping_str = f"{int(round(float(ping_val)))} мс"
+                        except (ValueError, TypeError):
+                            ping_str = "замер..."
+                    else:
+                        ping_str = "замер..."
+                    lines.append(f"• {g_name} — {ping_str} [{g_mode}]")
         elif state == "hosting_active":
             lines.append("Гости: нет подключений")
 
@@ -713,6 +738,16 @@ class TelegramBotService:
         lines.append(f"\n<i>Обновлено: {utc_now}</i>")
 
         return "\n".join(lines)
+
+    @staticmethod
+    def _get_dashboard_structural_hash(text: str) -> str:
+        """
+        Computes SHA-256 hash of dashboard text stripped of dynamic ping numbers
+        and update timestamp to isolate structural changes from network jitter.
+        """
+        cleaned = re.sub(r"<i>Обновлено:.*?</i>", "", text, flags=re.DOTALL)
+        cleaned = re.sub(r"\d+\s*мс", "X мс", cleaned)
+        return hashlib.sha256(cleaned.encode("utf-8")).hexdigest()
 
     def build_dashboard_keyboard(self) -> Dict[str, Any]:
         """Builds inline keyboard markup for the pinned live dashboard."""
@@ -748,9 +783,26 @@ class TelegramBotService:
 
         # Deduplicate using content hash
         content_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
-        if not force and content_hash == self._last_dashboard_hash:
-            logger.debug("update_dashboard: Content unchanged, skipping API call.")
-            return None
+        structural_hash = self._get_dashboard_structural_hash(text)
+        now_mono = time.monotonic()
+
+        if not force:
+            if content_hash == self._last_dashboard_hash:
+                logger.debug("update_dashboard: Content unchanged, skipping API call.")
+                return None
+
+            # Anti-jitter throttling: if structural content (players, modes, save, state)
+            # did not change and only ping ms fluctuated, throttle to at most once per 25s
+            if (
+                self._last_dashboard_structural_hash is not None
+                and self._last_dashboard_structural_hash == structural_hash
+                and (now_mono - self._last_dashboard_edit_ts) < 25.0
+            ):
+                logger.debug(
+                    "update_dashboard: Throttling ping jitter (elapsed: %.1fs < 25.0s), skipping API call.",
+                    now_mono - self._last_dashboard_edit_ts,
+                )
+                return None
 
         msg_id = self.settings.pinned_message_id
         result = None
@@ -765,6 +817,8 @@ class TelegramBotService:
             if not result or result.get("status") == "not_modified":
                 if result and result.get("status") == "not_modified":
                     self._last_dashboard_hash = content_hash
+                    self._last_dashboard_structural_hash = structural_hash
+                    self._last_dashboard_edit_ts = now_mono
                     return result
                 # Edit failed: message might have been deleted by user
                 logger.info("Pinned dashboard message %d could not be edited. Creating new.", msg_id)
@@ -782,7 +836,63 @@ class TelegramBotService:
                 logger.info("Created new dashboard message %d (pinned: %s)", new_msg_id, pinned_ok)
 
         self._last_dashboard_hash = content_hash
+        self._last_dashboard_structural_hash = structural_hash
+        self._last_dashboard_edit_ts = now_mono
         return result
+
+    def format_ping_report_html(self) -> str:
+        """
+        Formats a network latency and tunnel mode diagnostic report.
+        Strictly zero emojis.
+        """
+        lines = ["<b>Сетевая диагностика (P2P / Relay)</b>\n"]
+
+        state = "idle"
+        host_name = None
+        udp_port = None
+        guests: List[Dict[str, Any]] = []
+
+        if self.session_manager:
+            status = self.session_manager.get_public_status()
+            state = status.get("state", "idle")
+            host_name = status.get("host_name")
+            udp_port = status.get("host_udp_port")
+            guests = status.get("active_guests", [])
+
+        if state == "idle":
+            lines.append("Статус: <b>[Свободен]</b> — активной игровой сессии нет.")
+            lines.append("Координатор VPS: <b>Онлайн (&lt;1 мс)</b>")
+        else:
+            h_name = html.escape(str(host_name or "Неизвестно"))
+            port_str = str(udp_port) if udp_port else "авто"
+            lines.append(f"Хост лобби: <b>{h_name}</b> (UDP порт: {port_str})")
+            if not guests:
+                lines.append("Подключенные гости: <b>нет</b>")
+            else:
+                lines.append(f"\n<b>Подключенные гости ({len(guests)}):</b>")
+                for g in guests:
+                    g_name = html.escape(str(g.get("name", "Игрок")))
+                    direct = g.get("direct_p2p", True)
+                    raw_mode = g.get("mode")
+                    g_mode = "Relay" if (raw_mode == "Relay" or not direct) else "P2P"
+                    ping_val = g.get("ping_ms")
+                    if ping_val is not None:
+                        try:
+                            ping_str = f"{int(round(float(ping_val)))} мс"
+                        except (ValueError, TypeError):
+                            ping_str = "замер..."
+                    else:
+                        ping_str = "замер..."
+                    lines.append(f"• <b>{g_name}</b> — {ping_str} [{g_mode}]")
+
+            lines.append("\n<i>[P2P] — прямое соединение между игроками; [Relay] — ретрансляция через VPS.</i>")
+
+        return "\n".join(lines)
+
+    async def _handle_ping_command(self, chat_id: int) -> None:
+        """Sends the network ping and tunnel mode diagnostic report to chat."""
+        report = self.format_ping_report_html()
+        await self.send_message(chat_id=chat_id, text=report)
 
     # --------------------------------------------------------------------------
     # Interactive Settings Menu
@@ -845,6 +955,12 @@ class TelegramBotService:
                 {
                     "text": toggle_label("Живой дашборд", self.settings.live_dashboard_enabled),
                     "callback_data": "toggle:live_dashboard_enabled",
+                },
+            ],
+            [
+                {
+                    "text": toggle_label("Пинг в закрепе", self.settings.show_ping_in_dashboard),
+                    "callback_data": "toggle:show_ping_in_dashboard",
                 },
             ],
             # AI Chronicle settings
@@ -1250,8 +1366,8 @@ class TelegramBotService:
                             reply_markup=self.build_settings_keyboard(),
                         )
 
-                    # Trigger dashboard update if live dashboard was re-enabled
-                    if field_name == "live_dashboard_enabled" and new_val:
+                    # Trigger dashboard update if live dashboard was re-enabled or ping setting toggled
+                    if (field_name == "live_dashboard_enabled" and new_val) or (field_name == "show_ping_in_dashboard"):
                         await self.update_dashboard(force=True)
 
                     status_str = "ВКЛ" if new_val else "ВЫКЛ"
@@ -1681,6 +1797,10 @@ class TelegramBotService:
             await self.send_message(chat_id=chat_id, text=status_text)
             return True
 
+        if cmd == "/ping":
+            await self._handle_ping_command(chat_id)
+            return True
+
         if cmd in ("/id", "/myid"):
             u_tag = f"@{username}" if username else "отсутствует"
             f_name = html.escape(user.get("first_name", "") or "Пользователь")
@@ -1923,6 +2043,31 @@ class TelegramBotService:
     # Long Polling Update Loop
     # --------------------------------------------------------------------------
 
+    async def register_commands(self) -> bool:
+        """
+        Registers default command list with Telegram via setMyCommands.
+        Enables command autocomplete in chat input.
+        """
+        if not self.is_configured:
+            return False
+
+        commands = [
+            {"command": "ping", "description": "Пинг игроков и режим сети (P2P / Relay)"},
+            {"command": "status", "description": "Текущий статус игрового сервера"},
+            {"command": "settings", "description": "Интерактивное меню настроек"},
+            {"command": "invite", "description": "Создать Код Дружбы"},
+            {"command": "myid", "description": "Узнать свой Telegram ID"},
+            {"command": "admin", "description": "Управление администраторами"},
+        ]
+        url = f"{self.bot_url}/setMyCommands"
+        try:
+            resp = await self._client.post(url, json={"commands": commands})
+            data = resp.json()
+            return bool(data.get("ok"))
+        except Exception as exc:
+            logger.debug("Network error during setMyCommands: %s", exc)
+            return False
+
     async def start_polling(self) -> None:
         """Starts background tasks for getUpdates long-polling and periodic dashboard refresh."""
         if self._is_polling:
@@ -1938,6 +2083,7 @@ class TelegramBotService:
             self._dashboard_timer_loop(),
             name="tg_bot_dashboard_timer",
         )
+        asyncio.create_task(self.register_commands(), name="tg_bot_register_commands")
         logger.info("Telegram Bot long-polling and dashboard timer started.")
 
     async def start(self) -> None:

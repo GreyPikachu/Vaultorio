@@ -28,11 +28,24 @@ class BeginFinalUploadRequest(BaseModel):
     session_token: str = Field(..., min_length=16, description="Host session token")
 
 
+class GuestMetricItem(BaseModel):
+    """Per-guest network latency and tunnel mode reported by the active Host."""
+
+    name: str = Field(..., min_length=1, max_length=64, description="Guest player nickname or ID")
+    guest_id: Optional[str] = Field(None, max_length=64, description="Optional internal guest ID")
+    ping_ms: Optional[float] = Field(None, ge=0.0, le=9999.0, description="Measured RTT in milliseconds")
+    direct_p2p: bool = Field(True, description="True if direct UDP Hole Punching is active, False if Relay")
+    mode: str = Field("P2P", description="Tunnel mode label: 'P2P' or 'Relay'")
+
+
 class HeartbeatRequest(BaseModel):
     """Payload for periodic host lease renewal."""
 
     session_token: str = Field(..., min_length=16, description="Host session token")
     udp_port: Optional[int] = Field(None, ge=1, le=65535, description="Updated external UDP port")
+    guests_metrics: Optional[List[GuestMetricItem]] = Field(
+        None, description="Optional list of connected guests' RTT and tunnel metrics"
+    )
 
 
 class ReleaseHostRequest(BaseModel):

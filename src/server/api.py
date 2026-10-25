@@ -366,9 +366,16 @@ def create_app(
         Renews the host lease timestamp to prevent network disconnect expiration.
         """
         try:
+            metrics_list = (
+                [m.model_dump() if hasattr(m, "model_dump") else m.dict() for m in req.guests_metrics]
+                if req.guests_metrics is not None
+                else None
+            )
+
             result = app_session.heartbeat(
                 session_token=req.session_token,
                 host_udp_port=req.udp_port,
+                guests_metrics=metrics_list,
             )
 
             if not result.get("success"):
@@ -378,6 +385,9 @@ def create_app(
                 if reason == "not_hosting":
                     return JSONResponse(status_code=409, content=result)
                 return JSONResponse(status_code=400, content=result)
+
+            if app_telegram and req.guests_metrics is not None:
+                _dispatch_tg_hook(app_telegram.update_dashboard(force=False))
 
             return JSONResponse(status_code=200, content=result)
         except Exception as exc:
