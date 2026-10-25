@@ -527,6 +527,126 @@ class TestTelegramBotServiceAsync(unittest.IsolatedAsyncioTestCase):
         dec = decode_invite_code(pkg["invite_code"], "nauvis-secret-base")
         self.assertEqual(dec["ticket"], pkg["ticket"])
 
+    async def test_admin_commands_and_id_resolution(self):
+        """Verifies /myid, /admin list, /admin add, /admin remove, and reply-to promotion."""
+        bot = TelegramBotService(config=self.config, client=self.mock_client)
+        bot.settings.bot_token = "123:test"
+        bot.settings.chat_id = 12345
+        bot.settings.admin_user_ids = [100]  # Primary owner
+
+        # 1. /myid command
+        id_msg = {
+            "message_id": 20,
+            "chat": {"id": 12345},
+            "from": {"id": 777, "username": "TestFriend", "first_name": "Friend"},
+            "text": "/myid",
+        }
+        res_id = await bot.handle_message(id_msg)
+        self.assertTrue(res_id)
+        # Verify user 777 was cached in known_users
+        self.assertEqual(bot.settings.known_users.get("testfriend"), 777)
+
+        # 2. Unauthorized user tries /admin list -> denied
+        unauth_admin = {
+            "message_id": 21,
+            "chat": {"id": 12345},
+            "from": {"id": 777, "username": "TestFriend"},
+            "text": "/admin list",
+        }
+        res_unauth = await bot.handle_message(unauth_admin)
+        self.assertTrue(res_unauth)
+
+        # 3. Owner runs /admin list
+        owner_admin = {
+            "message_id": 22,
+            "chat": {"id": 12345},
+            "from": {"id": 100, "username": "Owner"},
+            "text": "/admin list",
+        }
+        res_owner = await bot.handle_message(owner_admin)
+        self.assertTrue(res_owner)
+
+        # 4. Owner adds admin by @username
+        add_by_tag = {
+            "message_id": 23,
+            "chat": {"id": 12345},
+            "from": {"id": 100},
+            "text": "/admin add @TestFriend",
+        }
+        await bot.handle_message(add_by_tag)
+        self.assertIn(777, bot.settings.admin_user_ids)
+
+        # 5. Owner adds another admin via reply
+        add_by_reply = {
+            "message_id": 24,
+            "chat": {"id": 12345},
+            "from": {"id": 100},
+            "text": "/admin add",
+            "reply_to_message": {
+                "message_id": 15,
+                "from": {"id": 888, "username": "ReplyUser"},
+                "text": "Hello world",
+            },
+        }
+        await bot.handle_message(add_by_reply)
+        self.assertIn(888, bot.settings.admin_user_ids)
+
+        # 6. Try removing primary owner -> denied
+        rm_owner = {
+            "message_id": 25,
+            "chat": {"id": 12345},
+            "from": {"id": 100},
+            "text": "/admin remove 100",
+        }
+        await bot.handle_message(rm_owner)
+        self.assertIn(100, bot.settings.admin_user_ids)
+
+        # 7. Remove admin 777
+        rm_friend = {
+            "message_id": 26,
+            "chat": {"id": 12345},
+            "from": {"id": 100},
+            "text": "/admin remove @TestFriend",
+        }
+        await bot.handle_message(rm_friend)
+        self.assertNotIn(777, bot.settings.admin_user_ids)
+
+    def test_admin_cli_commands(self):
+        """Verifies admin-list, admin-add, and admin-remove via admin_cli."""
+        import io
+        from contextlib import redirect_stdout, redirect_stderr
+
+        # 1. admin-list
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            code = admin_cli_main(["--storage-dir", str(self.config.storage_dir), "admin-list"])
+        self.assertEqual(code, 0)
+
+        # 2. admin-add
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            code = admin_cli_main([
+                "--storage-dir", str(self.config.storage_dir),
+                "admin-add", "--user-id", "9999", "--username", "@clibot",
+            ])
+        self.assertEqual(code, 0)
+        self.assertIn("9999", buf.getvalue())
+
+        # Verify added to file
+        settings = TelegramBotSettings.load(self.config.telegram_state_path)
+        self.assertIn(9999, settings.admin_user_ids)
+
+        # 3. admin-remove with --force
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            code = admin_cli_main([
+                "--storage-dir", str(self.config.storage_dir),
+                "admin-remove", "--user-id", "9999", "--force",
+            ])
+        self.assertEqual(code, 0)
+        settings = TelegramBotSettings.load(self.config.telegram_state_path)
+        self.assertNotIn(9999, settings.admin_user_ids)
+
     def test_invite_wizard_zero_emojis(self):
         """CRITICAL: Verifies invite wizard keyboards and templates contain strictly ZERO emojis."""
         kb_wiz = TelegramBotService.build_invite_wizard_keyboard(selected_ttl=86400, selected_uses=1, is_custom=True)

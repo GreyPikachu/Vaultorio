@@ -75,6 +75,8 @@ class TelegramBotSettings:
 
     # Access control
     admin_user_ids: List[int] = field(default_factory=list)
+    known_users: Dict[str, int] = field(default_factory=dict)
+    admin_usernames: Dict[str, str] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         """Serializes settings to a dictionary."""
@@ -870,7 +872,10 @@ class TelegramBotService:
                 {"text": "Изменить заголовок", "callback_data": "action:prompt_title"},
             ],
             [
+                {"text": f"Администраторы ({len(self.settings.admin_user_ids)})", "callback_data": "action:admin_list"},
                 {"text": "Пересоздать закреп", "callback_data": "action:repin"},
+            ],
+            [
                 {"text": "Создать Код Дружбы", "callback_data": "action:prompt_invite"},
             ],
             [
@@ -879,6 +884,27 @@ class TelegramBotService:
         ]
 
         return {"inline_keyboard": keyboard}
+
+    def format_admin_list_html(self) -> str:
+        """Formats the list of authorized administrators in HTML."""
+        lines = ["<b>Список администраторов бота:</b>\n"]
+        if not self.settings.admin_user_ids:
+            lines.append("<i>Список администраторов пуст (доступ открыт для настройки).</i>")
+        else:
+            for idx, a_id in enumerate(self.settings.admin_user_ids, 1):
+                tag = self.settings.admin_usernames.get(str(a_id), "")
+                tag_str = f" ({html.escape(tag)})" if tag else ""
+                role = " [Владелец]" if idx == 1 else " [Администратор]"
+                lines.append(f"{idx}. <code>{a_id}</code>{tag_str}{role}")
+
+        lines.append(
+            "\n<b>Как назначить нового администратора:</b>\n"
+            "• Ответом на сообщение друга в группе: <code>/admin add</code>\n"
+            "• По никнейму (если друг писал в чат): <code>/admin add @username</code>\n"
+            "• По личному номеру: <code>/admin add 123456789</code>\n\n"
+            "<i>Узнать свой Telegram ID можно командой <code>/myid</code>.</i>"
+        )
+        return "\n".join(lines)
 
     @staticmethod
     def _format_readable_ttl(ttl_seconds: int) -> str:
@@ -1161,6 +1187,14 @@ class TelegramBotService:
         chat_id = chat.get("id")
         user = callback_query.get("from", {})
         user_id = user.get("id", 0)
+        username = user.get("username", "")
+
+        if user_id and username:
+            clean_tag = username.lower().lstrip("@")
+            if self.settings.known_users.get(clean_tag) != user_id:
+                self.settings.known_users[clean_tag] = user_id
+                self.settings.admin_usernames[str(user_id)] = f"@{username}"
+                self.save_settings()
 
         logger.debug("Received callback: data='%s', user=%d, msg=%s", cb_data, user_id, msg_id)
 
@@ -1480,6 +1514,25 @@ class TelegramBotService:
             await self.answer_callback_query(callback_query_id=cb_id)
             return True
 
+        if cb_data == "action:admin_list":
+            admin_text = self.format_admin_list_html()
+            back_kb = {
+                "inline_keyboard": [
+                    [{"text": "Назад в настройки", "callback_data": "menu:main"}]
+                ]
+            }
+            if msg_id and chat_id:
+                await self.edit_message_text(
+                    message_id=msg_id,
+                    chat_id=chat_id,
+                    text=admin_text,
+                    reply_markup=back_kb,
+                )
+            else:
+                await self.send_message(chat_id=chat_id, text=admin_text, reply_markup=back_kb)
+            await self.answer_callback_query(callback_query_id=cb_id)
+            return True
+
         await self.answer_callback_query(callback_query_id=cb_id)
         return False
 
@@ -1502,10 +1555,30 @@ class TelegramBotService:
         chat_id = chat.get("id")
         user = message.get("from", {})
         user_id = user.get("id", 0)
+        username = user.get("username", "")
         msg_id = message.get("message_id")
 
         if not text or not chat_id:
             return False
+
+        if user_id and username:
+            clean_tag = username.lower().lstrip("@")
+            if self.settings.known_users.get(clean_tag) != user_id:
+                self.settings.known_users[clean_tag] = user_id
+                self.settings.admin_usernames[str(user_id)] = f"@{username}"
+                self.save_settings()
+
+        reply_to = message.get("reply_to_message", {})
+        if reply_to:
+            r_user = reply_to.get("from", {})
+            r_id = r_user.get("id", 0)
+            r_uname = r_user.get("username", "")
+            if r_id and r_uname:
+                clean_r_tag = r_uname.lower().lstrip("@")
+                if self.settings.known_users.get(clean_r_tag) != r_id:
+                    self.settings.known_users[clean_r_tag] = r_id
+                    self.settings.admin_usernames[str(r_id)] = f"@{r_uname}"
+                    self.save_settings()
 
         # Check if user is entering a custom passphrase in the invite wizard
         state = self._wizard_state.get(user_id)
@@ -1600,6 +1673,169 @@ class TelegramBotService:
             status_text = self.format_dashboard_html()
             await self.send_message(chat_id=chat_id, text=status_text)
             return True
+
+        if cmd in ("/id", "/myid"):
+            u_tag = f"@{username}" if username else "отсутствует"
+            f_name = html.escape(user.get("first_name", "") or "Пользователь")
+            is_adm = "Да" if self._is_user_authorized(user_id) else "Нет"
+            await self.send_message(
+                chat_id=chat_id,
+                text=(
+                    "<b>Информация об аккаунте:</b>\n\n"
+                    f"• <b>Имя:</b> {f_name}\n"
+                    f"• <b>Username:</b> {u_tag}\n"
+                    f"• <b>Telegram ID:</b> <code>{user_id}</code> (нажмите для копирования)\n"
+                    f"• <b>Права администратора:</b> {is_adm}"
+                ),
+            )
+            return True
+
+        if cmd == "/admin":
+            if not self._is_user_authorized(user_id):
+                await self.send_message(
+                    chat_id=chat_id,
+                    text="У вас нет прав администратора для управления доступом.",
+                )
+                return True
+
+            subcmd = ""
+            subarg = ""
+            if args:
+                subparts = args.split(maxsplit=1)
+                subcmd = subparts[0].lower()
+                subarg = subparts[1].strip() if len(subparts) > 1 else ""
+
+            if not subcmd or subcmd == "list":
+                admin_text = self.format_admin_list_html()
+                await self.send_message(chat_id=chat_id, text=admin_text)
+                return True
+
+            if subcmd == "add":
+                target_id: Optional[int] = None
+                target_tag: str = ""
+
+                # 1. Check if replying to message
+                reply_to = message.get("reply_to_message", {})
+                reply_user = reply_to.get("from", {})
+                if reply_user and reply_user.get("id"):
+                    target_id = reply_user["id"]
+                    if reply_user.get("username"):
+                        target_tag = f"@{reply_user['username']}"
+
+                # 2. Check arguments
+                if not target_id and subarg:
+                    clean_arg = subarg.strip()
+                    if clean_arg.isdigit():
+                        target_id = int(clean_arg)
+                        target_tag = self.settings.admin_usernames.get(str(target_id), "")
+                    else:
+                        clean_uname = clean_arg.lstrip("@").lower()
+                        target_id = self.settings.known_users.get(clean_uname)
+                        target_tag = f"@{clean_arg.lstrip('@')}"
+
+                if not target_id:
+                    if subarg and (subarg.startswith("@") or not subarg.isdigit()):
+                        clean_uname = subarg.lstrip("@")
+                        await self.send_message(
+                            chat_id=chat_id,
+                            text=(
+                                f"Пользователь @{clean_uname} пока не писал боту или в эту группу.\n\n"
+                                "Telegram не позволяет ботам находить чужие ID только по никнейму.\n\n"
+                                "<b>Как его добавить:</b>\n"
+                                "1. Ответьте на любое его сообщение в группе командой <code>/admin add</code>\n"
+                                "2. Или попросите его написать в группу или боту команду <code>/myid</code> и добавьте по номеру: <code>/admin add ID</code>"
+                            ),
+                        )
+                    else:
+                        await self.send_message(
+                            chat_id=chat_id,
+                            text=(
+                                "Укажите пользователя для добавления:\n"
+                                "• Ответом на сообщение: <code>/admin add</code>\n"
+                                "• По никнейму: <code>/admin add @username</code>\n"
+                                "• По номеру: <code>/admin add 123456789</code>"
+                            ),
+                        )
+                    return True
+
+                if target_id in self.settings.admin_user_ids:
+                    tag_display = f" ({target_tag})" if target_tag else ""
+                    await self.send_message(
+                        chat_id=chat_id,
+                        text=f"Пользователь <code>{target_id}</code>{tag_display} уже является администратором.",
+                    )
+                    return True
+
+                self.settings.admin_user_ids.append(target_id)
+                if target_tag:
+                    self.settings.admin_usernames[str(target_id)] = target_tag
+                self.save_settings()
+
+                tag_display = f" ({target_tag})" if target_tag else ""
+                await self.send_message(
+                    chat_id=chat_id,
+                    text=(
+                        f"Пользователь <code>{target_id}</code>{tag_display} успешно добавлен в список администраторов.\n"
+                        "Теперь ему доступны все команды управления сервером и генерации Кодов Дружбы."
+                    ),
+                )
+                return True
+
+            if subcmd in ("remove", "del", "delete", "rm"):
+                target_id: Optional[int] = None
+                target_tag: str = ""
+
+                reply_to = message.get("reply_to_message", {})
+                reply_user = reply_to.get("from", {})
+                if reply_user and reply_user.get("id"):
+                    target_id = reply_user["id"]
+                    if reply_user.get("username"):
+                        target_tag = f"@{reply_user['username']}"
+
+                if not target_id and subarg:
+                    clean_arg = subarg.strip()
+                    if clean_arg.isdigit():
+                        target_id = int(clean_arg)
+                    else:
+                        clean_uname = clean_arg.lstrip("@").lower()
+                        target_id = self.settings.known_users.get(clean_uname)
+                        target_tag = f"@{clean_arg.lstrip('@')}"
+
+                if not target_id:
+                    await self.send_message(
+                        chat_id=chat_id,
+                        text=(
+                            "Укажите пользователя для удаления:\n"
+                            "• Ответом на сообщение: <code>/admin remove</code>\n"
+                            "• По никнейму: <code>/admin remove @username</code>\n"
+                            "• По номеру: <code>/admin remove 123456789</code>"
+                        ),
+                    )
+                    return True
+
+                if target_id not in self.settings.admin_user_ids:
+                    await self.send_message(
+                        chat_id=chat_id,
+                        text=f"Пользователь <code>{target_id}</code> не найден в списке администраторов.",
+                    )
+                    return True
+
+                if self.settings.admin_user_ids and self.settings.admin_user_ids[0] == target_id:
+                    await self.send_message(
+                        chat_id=chat_id,
+                        text="Нельзя удалить главного владельца сервера из администраторов.",
+                    )
+                    return True
+
+                self.settings.admin_user_ids.remove(target_id)
+                self.save_settings()
+
+                tag_display = f" ({target_tag})" if target_tag else ""
+                await self.send_message(
+                    chat_id=chat_id,
+                    text=f"Пользователь <code>{target_id}</code>{tag_display} удален из списка администраторов.",
+                )
+                return True
 
         if cmd == "/invite":
             if not self._is_user_authorized(user_id):

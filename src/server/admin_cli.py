@@ -312,6 +312,59 @@ def handle_setup_telegram(args: argparse.Namespace) -> int:
         return 1
 
 
+def handle_admin_manage(args: argparse.Namespace) -> int:
+    """Обрабатывает команды admin-list, admin-add, admin-remove."""
+    try:
+        config = _get_server_config(args.config, args.storage_dir)
+        settings = TelegramBotSettings.load(config.telegram_state_path)
+
+        if args.admin_subcmd == "list":
+            sys.stdout.write("=================================================================\n")
+            sys.stdout.write("             АДМИНИСТРАТОРЫ TELEGRAM-БОТА                        \n")
+            sys.stdout.write("=================================================================\n")
+            if not settings.admin_user_ids:
+                sys.stdout.write("Список администраторов пуст (доступ открыт).\n")
+            else:
+                for idx, uid in enumerate(settings.admin_user_ids, 1):
+                    tag = settings.admin_usernames.get(str(uid), "")
+                    tag_str = f" ({tag})" if tag else ""
+                    role = " [Владелец]" if idx == 1 else " [Администратор]"
+                    sys.stdout.write(f"{idx}. ID: {uid}{tag_str}{role}\n")
+            return 0
+
+        elif args.admin_subcmd == "add":
+            uid = int(args.user_id)
+            if uid in settings.admin_user_ids:
+                sys.stdout.write(f"Пользователь {uid} уже является администратором.\n")
+                return 0
+            settings.admin_user_ids.append(uid)
+            if args.username:
+                u_tag = args.username if args.username.startswith("@") else f"@{args.username}"
+                settings.admin_usernames[str(uid)] = u_tag
+                settings.known_users[args.username.lstrip("@").lower()] = uid
+            settings.save(config.telegram_state_path)
+            sys.stdout.write(f"Успех: Пользователь {uid} добавлен в список администраторов.\n")
+            return 0
+
+        elif args.admin_subcmd == "remove":
+            uid = int(args.user_id)
+            if uid not in settings.admin_user_ids:
+                sys.stderr.write(f"Пользователь {uid} не найден в списке администраторов.\n")
+                return 1
+            if settings.admin_user_ids and settings.admin_user_ids[0] == uid and not getattr(args, "force", False):
+                sys.stderr.write(f"Ошибка: Нельзя удалить главного владельца {uid} без флага --force.\n")
+                return 1
+            settings.admin_user_ids.remove(uid)
+            settings.save(config.telegram_state_path)
+            sys.stdout.write(f"Успех: Пользователь {uid} удален из списка администраторов.\n")
+            return 0
+
+        return 0
+    except Exception as exc:
+        sys.stderr.write(f"Ошибка управления администраторами: {exc}\n")
+        return 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Формирует и настраивает парсер аргументов командной строки."""
     parser = argparse.ArgumentParser(
@@ -365,6 +418,22 @@ def build_parser() -> argparse.ArgumentParser:
     tg_parser.add_argument("--openrouter-model", type=str, default=None, help="Модель OpenRouter (по умолчанию google/gemini-2.0-flash-exp:free).")
     tg_parser.add_argument("--dashboard-title", type=str, default=None, help="Заголовок закрепленного дашборда.")
 
+    # 6. admin-list
+    admin_list_p = subparsers.add_parser("admin-list", help="Показать список администраторов Telegram-бота.")
+    admin_list_p.set_defaults(admin_subcmd="list")
+
+    # 7. admin-add
+    admin_add_p = subparsers.add_parser("admin-add", help="Добавить Telegram ID в список администраторов бота.")
+    admin_add_p.add_argument("--user-id", "-u", required=True, type=int, help="Числовой Telegram ID пользователя.")
+    admin_add_p.add_argument("--username", "-n", type=str, default=None, help="Опциональный никнейм (@username).")
+    admin_add_p.set_defaults(admin_subcmd="add")
+
+    # 8. admin-remove
+    admin_rm_p = subparsers.add_parser("admin-remove", help="Удалить Telegram ID из списка администраторов бота.")
+    admin_rm_p.add_argument("--user-id", "-u", required=True, type=int, help="Числовой Telegram ID пользователя.")
+    admin_rm_p.add_argument("--force", "-f", action="store_true", help="Принудительное удаление (включая владельца).")
+    admin_rm_p.set_defaults(admin_subcmd="remove")
+
     return parser
 
 
@@ -383,6 +452,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         return handle_cleanup(args)
     elif args.command == "setup-telegram":
         return handle_setup_telegram(args)
+    elif args.command in ("admin-list", "admin-add", "admin-remove"):
+        return handle_admin_manage(args)
     else:
         parser.print_help()
         return 1
