@@ -513,6 +513,7 @@ class OpenRouterChronicleService:
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_content},
                     ],
+                    "reasoning": {"max_tokens": 0},
                     "max_tokens": 700,
                     "temperature": 0.7,
                 }
