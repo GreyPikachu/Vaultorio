@@ -96,12 +96,12 @@ class TestTelegramJoinGuide(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(buttons["guide:menu"], "Как войти в игру")
 
     def test_format_join_guide_html_content(self):
-        """Verifies HTML formatted guide text includes copyable code blocks, blockquotes, and key instructions."""
+        """Verifies HTML formatted guide text includes copyable code blocks and excludes blockquotes."""
         # Menu
         text_menu = self.bot.format_join_guide_html(os_type="menu")
         self.assertIn("Как войти в совместную игру Factorio", text_menu)
         self.assertIn("Выберите вашу операционную систему", text_menu)
-        self.assertIn("<blockquote>", text_menu)
+        self.assertNotIn("<blockquote>", text_menu)
 
         # Windows
         text_win = self.bot.format_join_guide_html(os_type="windows")
@@ -111,7 +111,7 @@ class TestTelegramJoinGuide(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Код Дружбы", text_win)
         self.assertIn("127.0.0.1:34198", text_win)
         self.assertIn("[Cloud]", text_win)
-        self.assertIn("<blockquote>", text_win)
+        self.assertNotIn("<blockquote>", text_win)
 
         # macOS
         text_mac = self.bot.format_join_guide_html(os_type="macos")
@@ -120,10 +120,10 @@ class TestTelegramJoinGuide(unittest.IsolatedAsyncioTestCase):
         self.assertIn(f'<pre><code class="language-bash">{INSTALL_CMD_MACOS}</code></pre>', text_mac)
         self.assertIn("Код Дружбы", text_mac)
         self.assertIn("127.0.0.1:34198", text_mac)
-        self.assertIn("<blockquote>", text_mac)
+        self.assertNotIn("<blockquote>", text_mac)
 
     def test_build_join_guide_keyboard_structure(self):
-        """Verifies keyboard buttons, copy_text, and callbacks for menu, windows, and macos screens."""
+        """Verifies keyboard buttons and callbacks for menu, windows, and macos screens (no copy_text buttons)."""
         # Menu keyboard
         kb_menu = self.bot.build_join_guide_keyboard(os_type="menu")
         btn_map_menu = {b["callback_data"]: b["text"] for row in kb_menu["inline_keyboard"] for b in row if "callback_data" in b}
@@ -133,27 +133,22 @@ class TestTelegramJoinGuide(unittest.IsolatedAsyncioTestCase):
 
         # Windows keyboard
         kb_win = self.bot.build_join_guide_keyboard(os_type="windows")
-        win_rows = kb_win["inline_keyboard"]
-        self.assertIn("copy_text", win_rows[0][0])
-        self.assertEqual(win_rows[0][0]["copy_text"]["text"], INSTALL_CMD_WINDOWS)
-        self.assertEqual(win_rows[0][0]["text"], "Скопировать команду установки")
-
-        btn_map_win = {b["callback_data"]: b["text"] for row in win_rows for b in row if "callback_data" in b}
+        for row in kb_win["inline_keyboard"]:
+            for b in row:
+                self.assertNotIn("copy_text", b)
+        btn_map_win = {b["callback_data"]: b["text"] for row in kb_win["inline_keyboard"] for b in row if "callback_data" in b}
         self.assertIn("guide:macos", btn_map_win)
         self.assertIn("guide:menu", btn_map_win)
         self.assertIn("guide:close", btn_map_win)
 
         # macOS keyboard
         kb_mac = self.bot.build_join_guide_keyboard(os_type="macos")
-        mac_rows = kb_mac["inline_keyboard"]
-        self.assertIn("copy_text", mac_rows[0][0])
-        self.assertEqual(mac_rows[0][0]["copy_text"]["text"], INSTALL_CMD_MACOS)
-        self.assertEqual(mac_rows[0][0]["text"], "Скопировать команду установки")
-
-        btn_map_mac = {b["callback_data"]: b["text"] for row in mac_rows for b in row if "callback_data" in b}
+        for row in kb_mac["inline_keyboard"]:
+            for b in row:
+                self.assertNotIn("copy_text", b)
+        btn_map_mac = {b["callback_data"]: b["text"] for row in kb_mac["inline_keyboard"] for b in row if "callback_data" in b}
         self.assertIn("guide:windows", btn_map_mac)
         self.assertIn("guide:menu", btn_map_mac)
-        self.assertIn("guide:close", btn_map_mac)
         self.assertIn("guide:close", btn_map_mac)
 
     async def test_callback_from_pinned_dashboard_sends_new_message(self):
