@@ -849,6 +849,7 @@ class TelegramBotService:
                     {"text": "Миры в сейфе", "callback_data": "menu:worlds"},
                 ],
                 [
+                    {"text": "Как войти в игру", "callback_data": "guide:menu"},
                     {"text": "Настройки бота", "callback_data": "menu:open"},
                 ],
             ]
@@ -988,6 +989,97 @@ class TelegramBotService:
         """Sends the network ping and tunnel mode diagnostic report to chat."""
         report = self.format_ping_report_html()
         await self.send_message(chat_id=chat_id, text=report)
+
+    # --------------------------------------------------------------------------
+    # Interactive Connection Guide (Windows / macOS)
+    # --------------------------------------------------------------------------
+
+    def format_join_guide_html(self, os_type: str = "menu") -> str:
+        """
+        Formats interactive step-by-step connection guide for players.
+        Strictly zero emojis.
+        """
+        if os_type == "windows":
+            return (
+                "<b>Инструкция по входу в игру (Windows)</b>\n\n"
+                "<b>1. Установка модификации</b>\n"
+                "Откройте <b>PowerShell от имени Администратора</b> (Пуск -> найдите PowerShell -> Запуск от имени администратора) и вставьте команду (нажмите для копирования):\n"
+                "<code>irm https://raw.githubusercontent.com/GreyPikachu/Vaultorio/main/deploy/install.ps1 | iex</code>\n\n"
+                "Дождитесь завершения автоматической установки.\n\n"
+                "<b>2. Запуск и ввод Кода Дружбы</b>\n"
+                "Запустите Factorio как обычно (через Steam или ярлык).\n"
+                "В открывшемся окне настройки введите <b>Код Дружбы</b> (получите у хоста или через команду /invite) и сохраните.\n\n"
+                "<b>3. Подключение к сессии</b>\n"
+                "Посмотрите статус сервера (в закрепе группы или в уведомлении):\n\n"
+                "• <b>Если сервер [Свободен] (вы заходите первым):</b>\n"
+                "В меню игры: <i>Сетевая игра -> Запустить игру -> Облачный мир [Cloud]</i>.\n"
+                "Вы станете хостом, бот оповестит группу, а сохранения будут уходить в облачный сейф.\n\n"
+                "• <b>Если сервер [В игре!] (хост уже в мире):</b>\n"
+                "В меню игры: <i>Сетевая игра -> Подключиться к адресу</i>.\n"
+                "Адрес прямого P2P-туннеля (<code>127.0.0.1:34198</code>) уже скопирован в буфер обмена! Просто нажмите Вставить (Ctrl+V) и Подключиться."
+            )
+
+        if os_type == "macos":
+            return (
+                "<b>Инструкция по входу в игру (macOS)</b>\n\n"
+                "<b>1. Установка модификации</b>\n"
+                "Откройте <b>Терминал</b> (Spotlight -> Terminal) и выполните команду (нажмите для копирования):\n"
+                "<code>curl -fsSL https://raw.githubusercontent.com/GreyPikachu/Vaultorio/main/deploy/install.sh | bash</code>\n\n"
+                "Дождитесь завершения автоматической установки.\n\n"
+                "<b>2. Запуск и ввод Кода Дружбы</b>\n"
+                "Запустите Factorio через Steam или Launchpad. В окне настройки введите ваш <b>Код Дружбы</b> и сохраните.\n\n"
+                "<b>3. Подключение к сессии</b>\n"
+                "• <b>Если сервер [Свободен] (вы первый):</b>\n"
+                "В игре выберите: <i>Сетевая игра -> Запустить игру -> Облачный мир [Cloud]</i>.\n\n"
+                "• <b>Если сервер [В игре!] (хост уже играет):</b>\n"
+                "В игре выберите: <i>Сетевая игра -> Подключиться к адресу</i>. Вставьте адрес из буфера обмена (<code>127.0.0.1:34198</code>) и нажмите Подключиться."
+            )
+
+        # Default: os_type == "menu"
+        return (
+            "<b>Как войти в совместную игру Factorio (Vaultorio)</b>\n\n"
+            "Vaultorio объединяет игроков через прямой P2P-канал в обход NAT и автоматически синхронизирует мир в облачном сейфе.\n\n"
+            "Выберите вашу операционную систему для получения команд установки и пошаговой инструкции:"
+        )
+
+    def build_join_guide_keyboard(self, os_type: str = "menu") -> Dict[str, Any]:
+        """
+        Builds inline keyboard for the connection guide.
+        Strictly zero emojis.
+        """
+        if os_type == "windows":
+            return {
+                "inline_keyboard": [
+                    [{"text": "Инструкция для macOS", "callback_data": "guide:macos"}],
+                    [
+                        {"text": "« К выбору ОС", "callback_data": "guide:menu"},
+                        {"text": "Закрыть", "callback_data": "guide:close"},
+                    ],
+                ]
+            }
+
+        if os_type == "macos":
+            return {
+                "inline_keyboard": [
+                    [{"text": "Инструкция для Windows", "callback_data": "guide:windows"}],
+                    [
+                        {"text": "« К выбору ОС", "callback_data": "guide:menu"},
+                        {"text": "Закрыть", "callback_data": "guide:close"},
+                    ],
+                ]
+            }
+
+        return {
+            "inline_keyboard": [
+                [
+                    {"text": "Windows (PowerShell)", "callback_data": "guide:windows"},
+                    {"text": "macOS (Терминал)", "callback_data": "guide:macos"},
+                ],
+                [
+                    {"text": "Закрыть", "callback_data": "guide:close"},
+                ],
+            ]
+        }
 
     # --------------------------------------------------------------------------
     # Interactive Settings Menu
@@ -1587,6 +1679,31 @@ class TelegramBotService:
         if cb_data == "dash:refresh":
             await self.update_dashboard(force=True)
             await self.answer_callback_query(callback_query_id=cb_id, text="Статус обновлен!")
+            return True
+
+        if cb_data.startswith("guide:"):
+            subaction = cb_data.split(":", 1)[1]
+            if subaction == "close":
+                if msg_id and chat_id and msg_id != self.settings.pinned_message_id:
+                    await self.delete_message(message_id=msg_id, chat_id=chat_id)
+                await self.answer_callback_query(callback_query_id=cb_id, text="Инструкция закрыта.")
+                return True
+
+            g_text = self.format_join_guide_html(os_type=subaction)
+            g_kb = self.build_join_guide_keyboard(os_type=subaction)
+
+            # Never overwrite pinned dashboard
+            if msg_id and chat_id and msg_id != self.settings.pinned_message_id:
+                await self.edit_message_text(
+                    message_id=msg_id,
+                    chat_id=chat_id,
+                    text=g_text,
+                    reply_markup=g_kb,
+                )
+            else:
+                await self.send_message(text=g_text, chat_id=chat_id, reply_markup=g_kb)
+
+            await self.answer_callback_query(callback_query_id=cb_id)
             return True
 
         if not self._is_user_authorized(user_id):
@@ -2217,6 +2334,12 @@ class TelegramBotService:
             await self.send_message(chat_id=chat_id, text=menu_text, reply_markup=menu_kb)
             return True
 
+        if cmd in ("/join", "/guide", "/help"):
+            g_text = self.format_join_guide_html(os_type="menu")
+            g_kb = self.build_join_guide_keyboard(os_type="menu")
+            await self.send_message(chat_id=chat_id, text=g_text, reply_markup=g_kb)
+            return True
+
         if cmd == "/status":
             status_text = self.format_dashboard_html()
             await self.send_message(chat_id=chat_id, text=status_text)
@@ -2517,6 +2640,8 @@ class TelegramBotService:
             return False
 
         commands = [
+            {"command": "join", "description": "Инструкция: как войти в игру"},
+            {"command": "guide", "description": "Руководство по подключению"},
             {"command": "ping", "description": "Пинг игроков и режим сети (P2P / Relay)"},
             {"command": "status", "description": "Текущий статус игрового сервера"},
             {"command": "worlds", "description": "Миры в сейфе, архив и переключение слота"},
