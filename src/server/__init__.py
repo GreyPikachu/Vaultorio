@@ -35,6 +35,7 @@ from src.server.storage import (
 )
 from src.server.stun_coordinator import StunCoordinatorProtocol, start_stun_coordinator
 from src.server.telegram_bot import (
+    AI_EVENT_COOLDOWN_CHOICES,
     DASHBOARD_TIMEZONES,
     TelegramBotService,
     TelegramBotSettings,
@@ -43,6 +44,7 @@ from src.server.telegram_bot import (
 
 __version__ = "0.1.0"
 __all__ = [
+    "AI_EVENT_COOLDOWN_CHOICES",
     "AuthError",
     "AuthManager",
     "DASHBOARD_TIMEZONES",

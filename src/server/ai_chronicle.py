@@ -329,12 +329,19 @@ def format_fallback_chronicle_post(
     return "\n".join(lines)
 
 
-def should_process_report(trigger_type: str, settings: Optional[TelegramBotSettings]) -> bool:
-    """Проверяет, разрешена ли обработка данного триггера текущими настройками бота.
+def should_process_report(
+    trigger_type: str,
+    settings: Optional[TelegramBotSettings] = None,
+    last_event_ts: Optional[float] = None,
+    current_ts: Optional[float] = None,
+) -> bool:
+    """Проверяет, разрешена ли обработка данного триггера текущими настройками бота и кулдауном.
 
     Args:
         trigger_type: Тип триггера ('important_event', 'hourly_summary', 'session_summary').
         settings: Текущие настройки TelegramBotSettings.
+        last_event_ts: Таймстемп последнего отправленного события.
+        current_ts: Текущий таймстемп (по умолчанию time.time()).
 
     Returns:
         True, если отчет должен быть сгенерирован и отправлен в Telegram.
@@ -349,13 +356,35 @@ def should_process_report(trigger_type: str, settings: Optional[TelegramBotSetti
     schedule_mode = getattr(settings, "ai_schedule_mode", "hourly_and_exit")
 
     if schedule_mode == "hourly_and_exit":
-        return trigger_type in ("hourly_summary", "session_summary")
+        allowed = trigger_type in ("hourly_summary", "session_summary")
     elif schedule_mode == "hourly_and_events":
-        return trigger_type in ("important_event", "hourly_summary", "session_summary")
+        allowed = trigger_type in ("important_event", "hourly_summary", "session_summary")
     elif schedule_mode == "important_only":
-        return trigger_type in ("important_event", "session_summary")
+        allowed = trigger_type in ("important_event", "session_summary")
     elif schedule_mode == "only_on_exit":
-        return trigger_type == "session_summary"
+        allowed = trigger_type == "session_summary"
+    else:
+        allowed = True
+
+    if not allowed:
+        return False
+
+    # Проверка кулдауна для важных событий
+    if (
+        trigger_type == "important_event"
+        and isinstance(last_event_ts, (int, float))
+        and last_event_ts > 0
+    ):
+        now = current_ts if isinstance(current_ts, (int, float)) else time.time()
+        cooldown = getattr(settings, "ai_event_cooldown_sec", 1800)
+        elapsed = now - last_event_ts
+        if elapsed < cooldown:
+            logger.debug(
+                "Событие хроники отклонено по кулдауну: прошло %.1fс < %dс",
+                elapsed,
+                cooldown,
+            )
+            return False
 
     return True
 
@@ -387,6 +416,16 @@ class OpenRouterChronicleService:
 
         self._cached_models: list[str] = []
         self._last_discovery_time: float = 0.0
+        self._last_event_post_ts: float = 0.0
+
+    @property
+    def last_event_post_ts(self) -> float:
+        """Возвращает таймстемп последней публикации события."""
+        return self._last_event_post_ts
+
+    def record_event_post(self, timestamp: Optional[float] = None) -> None:
+        """Фиксирует факт и время публикации события."""
+        self._last_event_post_ts = timestamp if timestamp is not None else time.time()
 
     async def close(self) -> None:
         """Освобождает внутренний HTTP-клиент."""

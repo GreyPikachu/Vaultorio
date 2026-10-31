@@ -815,12 +815,25 @@ def create_app(
             logger.warning("Could not parse events_json in /chronicle/report: %s", parse_err)
             events = []
 
-        if not should_process_report(trigger_type, getattr(app_telegram, "settings", None)):
-            logger.debug("Chronicle report ignored due to bot schedule settings: %s", trigger_type)
+        last_event_ts = getattr(app_chronicle, "last_event_post_ts", None)
+        if not isinstance(last_event_ts, (int, float)):
+            last_event_ts = None
+        if not should_process_report(
+            trigger_type,
+            getattr(app_telegram, "settings", None),
+            last_event_ts=last_event_ts,
+        ):
+            logger.debug("Chronicle report ignored due to bot schedule or cooldown settings: %s", trigger_type)
             return JSONResponse(
                 status_code=200,
                 content={"success": True, "ignored": True, "reason": "schedule_disabled"},
             )
+
+        if trigger_type == "important_event" and hasattr(app_chronicle, "record_event_post"):
+            try:
+                app_chronicle.record_event_post()
+            except Exception as rec_err:
+                logger.debug("Could not record event post timestamp: %s", rec_err)
 
         screenshot_bytes: Optional[bytes] = None
         mime_type = "image/jpeg"

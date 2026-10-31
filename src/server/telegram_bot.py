@@ -47,6 +47,14 @@ AUTO_DELETE_TTL_CHOICES: List[Tuple[int, str]] = [
     (0, "Выкл"),
 ]
 
+# AI Chronicle event post cooldown choices (seconds, label)
+AI_EVENT_COOLDOWN_CHOICES: List[Tuple[int, str]] = [
+    (300, "5 мин"),
+    (900, "15 мин"),
+    (1800, "30 мин"),
+    (3600, "1 час"),
+]
+
 # Persona styles and labels
 AI_PERSONA_STYLES: List[Tuple[str, str]] = [
     ("reporter", "Репортер Наувиса"),
@@ -103,9 +111,10 @@ class TelegramBotSettings:
     silent_notifications: bool = False
     auto_delete_notifications_ttl: int = 120
 
-    # AI Chronicle settings (Task 032 & Task 041)
+    # AI Chronicle settings (Task 032 & Task 041 & Task 042)
     ai_chronicle_enabled: bool = True
     ai_schedule_mode: str = "hourly_and_exit"
+    ai_event_cooldown_sec: int = 1800
     ai_persona_style: str = "reporter"
     openrouter_api_key: str = ""
     openrouter_model: str = "google/gemini-2.0-flash-exp:free"
@@ -137,6 +146,13 @@ class TelegramBotSettings:
                 filtered["auto_delete_notifications_ttl"] = max(0, int(filtered["auto_delete_notifications_ttl"]))
             except (ValueError, TypeError):
                 filtered["auto_delete_notifications_ttl"] = 120
+        if "ai_event_cooldown_sec" in filtered:
+            try:
+                cd_val = int(filtered["ai_event_cooldown_sec"])
+                valid_cds = [c[0] for c in AI_EVENT_COOLDOWN_CHOICES]
+                filtered["ai_event_cooldown_sec"] = cd_val if cd_val in valid_cds else 1800
+            except (ValueError, TypeError):
+                filtered["ai_event_cooldown_sec"] = 1800
         return cls(**filtered)
 
     def save(self, file_path: Path) -> None:
@@ -1182,7 +1198,12 @@ class TelegramBotService:
             "dashboard_tz_offset",
         ):
             return "dashboard"
-        if field_name in ("ai_chronicle_enabled", "ai_schedule_mode", "ai_persona_style"):
+        if field_name in (
+            "ai_chronicle_enabled",
+            "ai_schedule_mode",
+            "ai_persona_style",
+            "ai_event_cooldown_sec",
+        ):
             return "chronicle"
         return "main"
 
@@ -1199,9 +1220,15 @@ class TelegramBotService:
                 "Управление живым закрепленным статусом сервера и отображаемыми данными:"
             )
         if subpage == "chronicle":
+            cooldown_map = dict(AI_EVENT_COOLDOWN_CHOICES)
+            curr_cooldown = cooldown_map.get(
+                self.settings.ai_event_cooldown_sec,
+                f"{self.settings.ai_event_cooldown_sec // 60} мин",
+            )
             return (
                 "<b>Настройки ИИ-хроники Наувиса</b>\n\n"
-                "Параметры генерации иллюстрированных новостей и отчетов нейросетью:"
+                "Параметры генерации иллюстрированных новостей и отчетов нейросетью:\n"
+                f"• Кулдаун событий: <b>{curr_cooldown}</b> (для режимов с событиями)"
             )
         return (
             "<b>Настройки Telegram-бота Factorio</b>\n\n"
@@ -1310,6 +1337,11 @@ class TelegramBotService:
             return {"inline_keyboard": keyboard}
 
         if subpage == "chronicle":
+            cooldown_map = dict(AI_EVENT_COOLDOWN_CHOICES)
+            curr_cooldown = cooldown_map.get(
+                self.settings.ai_event_cooldown_sec,
+                f"{self.settings.ai_event_cooldown_sec // 60} мин",
+            )
             keyboard = [
                 [
                     {
@@ -1323,12 +1355,19 @@ class TelegramBotService:
                         "callback_data": "cycle:ai_schedule_mode",
                     },
                     {
-                        "text": f"Стиль: {curr_style}",
-                        "callback_data": "cycle:ai_persona_style",
+                        "text": f"Кулдаун: {curr_cooldown}",
+                        "callback_data": "cycle:ai_event_cooldown_sec",
                     },
                 ],
                 [
-                    {"text": "Задать ключ OpenRouter", "callback_data": "action:prompt_openrouter_key"},
+                    {
+                        "text": f"Стиль: {curr_style}",
+                        "callback_data": "cycle:ai_persona_style",
+                    },
+                    {
+                        "text": "Ключ OpenRouter",
+                        "callback_data": "action:prompt_openrouter_key",
+                    },
                 ],
                 [
                     {"text": "« Назад", "callback_data": "menu:main"},
@@ -2030,6 +2069,12 @@ class TelegramBotService:
                 curr_idx = ttls.index(self.settings.auto_delete_notifications_ttl) if self.settings.auto_delete_notifications_ttl in ttls else 0
                 next_ttl = ttls[(curr_idx + 1) % len(ttls)]
                 self.settings.auto_delete_notifications_ttl = next_ttl
+                self.save_settings()
+            elif field_name == "ai_event_cooldown_sec":
+                cooldowns = [item[0] for item in AI_EVENT_COOLDOWN_CHOICES]
+                curr_idx = cooldowns.index(self.settings.ai_event_cooldown_sec) if self.settings.ai_event_cooldown_sec in cooldowns else 0
+                next_cd = cooldowns[(curr_idx + 1) % len(cooldowns)]
+                self.settings.ai_event_cooldown_sec = next_cd
                 self.save_settings()
 
             subpage = self.get_setting_subpage(field_name)

@@ -151,6 +151,7 @@ class TestTelegramSettingsSubmenus(unittest.IsolatedAsyncioTestCase):
         buttons = {b["callback_data"]: b["text"] for row in rows for b in row}
         self.assertIn("toggle:ai_chronicle_enabled", buttons)
         self.assertIn("cycle:ai_schedule_mode", buttons)
+        self.assertIn("cycle:ai_event_cooldown_sec", buttons)
         self.assertIn("cycle:ai_persona_style", buttons)
         self.assertIn("action:prompt_openrouter_key", buttons)
         self.assertIn("menu:main", buttons)
@@ -170,6 +171,7 @@ class TestTelegramSettingsSubmenus(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(TelegramBotService.get_setting_subpage("dashboard_tz_offset"), "dashboard")
         self.assertEqual(TelegramBotService.get_setting_subpage("ai_chronicle_enabled"), "chronicle")
         self.assertEqual(TelegramBotService.get_setting_subpage("ai_schedule_mode"), "chronicle")
+        self.assertEqual(TelegramBotService.get_setting_subpage("ai_event_cooldown_sec"), "chronicle")
         self.assertEqual(TelegramBotService.get_setting_subpage("ai_persona_style"), "chronicle")
         self.assertEqual(TelegramBotService.get_setting_subpage("unknown_key"), "main")
 
