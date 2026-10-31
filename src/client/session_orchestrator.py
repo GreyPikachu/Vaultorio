@@ -733,12 +733,6 @@ class SessionOrchestrator:
         game_args: Optional[List[str]] = None,
     ) -> subprocess.Popen:
         """Запускает процесс игры Factorio с переданными аргументами."""
-        # Установка/проверка микро-мода хроники перед стартом движка игры
-        try:
-            ensure_chronicle_mod_installed(self.env.mods_dir)
-        except Exception as chr_mod_err:
-            logger.warning(f"Ошибка автоустановки микро-мода хроники: {chr_mod_err}")
-
         core_bin = self.locate_core_executable(executable_path)
         cmd = [str(core_bin), *(game_args or [])]
         logger.info(f"Запуск процесса Factorio: {' '.join(cmd)}")

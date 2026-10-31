@@ -1045,4 +1045,191 @@ def test_t9_7_8_anti_latch_protects_fresh_direct_p2p():
     assert guest_proxy._host_active_endpoint == ("1.2.3.4", 5000)
 
 
+# ============================================================================
+# T9.8: Локальные динамические порты UDP и прямой LAN P2P (Задача 040)
+# ============================================================================
+
+
+def test_t9_2_local_socket_port_in_host_hello():
+    """T9.8.1: HostP2PBridge передает в HOST_HELLO реальный порт сокета _s_host, а не factorio_port."""
+    stun_port = _get_free_udp_port()
+    stun = DummyStunServer(stun_port)
+    stun.start()
+
+    dummy_factorio_port = 34197
+    host_bridge = HostP2PBridge(
+        session_token="token_host_socket_port_test",
+        stun_host="127.0.0.1",
+        stun_port=stun_port,
+        factorio_port=dummy_factorio_port,
+        poll_interval=0.01,
+    )
+
+    try:
+        host_bridge.start()
+        time.sleep(0.05)
+
+        pkts = stun.pop_packets()
+        assert len(pkts) >= 1
+        data, _ = pkts[0]
+        ctrl = decode_control_packet(data)
+        assert ctrl is not None
+        assert ctrl["cmd"] == "HOST_HELLO"
+
+        actual_socket_port = host_bridge._s_host.getsockname()[1]
+        assert ctrl["local_port"] == actual_socket_port
+        assert ctrl["local_port"] != dummy_factorio_port
+    finally:
+        host_bridge.stop()
+        stun.stop()
+
+
+def test_t9_3_local_socket_port_in_guest_hello():
+    """T9.8.2: GuestP2PProxy передает в GUEST_HELLO реальный порт сокета _s_guest, а не proxy_port."""
+    stun_port = _get_free_udp_port()
+    stun = DummyStunServer(stun_port)
+    stun.start()
+
+    dummy_proxy_port = _get_free_udp_port()
+    guest_proxy = GuestP2PProxy(
+        guest_name="TestGuestPort",
+        guest_id="guest_port_01",
+        stun_host="127.0.0.1",
+        stun_port=stun_port,
+        proxy_port=dummy_proxy_port,
+        poll_interval=0.01,
+    )
+
+    try:
+        guest_proxy.start()
+        time.sleep(0.05)
+
+        pkts = stun.pop_packets()
+        assert len(pkts) >= 1
+        data, _ = pkts[0]
+        ctrl = decode_control_packet(data)
+        assert ctrl is not None
+        assert ctrl["cmd"] == "GUEST_HELLO"
+
+        actual_socket_port = guest_proxy._s_guest.getsockname()[1]
+        assert ctrl["local_port"] == actual_socket_port
+        assert ctrl["local_port"] != dummy_proxy_port
+    finally:
+        guest_proxy.stop()
+        stun.stop()
+
+
+def test_t9_lan_direct_p2p_with_dynamic_local_ports():
+    """T9.8.3: Сквозное соединение в одной LAN без Hairpinning NAT с использованием динамических портов."""
+    stun_port = _get_free_udp_port()
+    stun = DummyStunServer(stun_port)
+    stun.start()
+
+    host_bridge = HostP2PBridge(
+        session_token="lan_p2p_token",
+        stun_host="127.0.0.1",
+        stun_port=stun_port,
+        factorio_port=_get_free_udp_port(),
+        poll_interval=0.01,
+    )
+
+    guest_proxy = GuestP2PProxy(
+        guest_name="LanPlayer",
+        guest_id="lan_g042",
+        stun_host="127.0.0.1",
+        stun_port=stun_port,
+        proxy_port=_get_free_udp_port(),
+        poll_interval=0.01,
+        punch_timeout_sec=2.0,
+    )
+
+    try:
+        host_bridge.start()
+        guest_proxy.start()
+        time.sleep(0.05)
+
+        # Считываем пакеты регистрации STUN
+        pkts = stun.pop_packets()
+        host_hello = None
+        guest_hello = None
+        host_addr = None
+        guest_addr = None
+
+        for data, addr in pkts:
+            c = decode_control_packet(data)
+            if c and c.get("cmd") == "HOST_HELLO":
+                host_hello = c
+                host_addr = addr
+            elif c and c.get("cmd") == "GUEST_HELLO":
+                guest_hello = c
+                guest_addr = addr
+
+        assert host_hello is not None and host_addr is not None
+        assert guest_hello is not None and guest_addr is not None
+
+        # Проверяем, что в HELLO переданы реальные сокеты
+        host_dynamic_port = host_hello["local_port"]
+        guest_dynamic_port = guest_hello["local_port"]
+        assert host_dynamic_port == host_bridge._s_host.getsockname()[1]
+        assert guest_dynamic_port == guest_proxy._s_guest.getsockname()[1]
+
+        # Симулируем поведение STUN: внешний IP роутера не маршрутизирует Hairpinning (198.51.100.254:9999),
+        # но передаются точные локальные адреса и порты, полученные из HELLO
+        dead_public_endpoint = ["198.51.100.254", 9999]
+
+        # STUN -> Host
+        stun.sendto(
+            encode_control_packet({
+                "cmd": "PEER_MATCH",
+                "role": "host",
+                "guest_id": "lan_g042",
+                "guest_name": "LanPlayer",
+                "guest_public": dead_public_endpoint,
+                "guest_local": ["127.0.0.1", guest_dynamic_port],
+            }),
+            host_addr,
+        )
+
+        # STUN -> Guest
+        stun.sendto(
+            encode_control_packet({
+                "cmd": "PEER_MATCH",
+                "role": "guest",
+                "guest_id": "lan_g042",
+                "host_public": dead_public_endpoint,
+                "host_local": ["127.0.0.1", host_dynamic_port],
+            }),
+            guest_addr,
+        )
+
+        # Ожидаем прямого пробития по локальному адресу
+        start_wait = time.time()
+        while time.time() - start_wait < 2.0:
+            g_status = host_bridge.get_guest_status("lan_g042")
+            if (
+                guest_proxy.is_direct_p2p
+                and g_status
+                and g_status["is_direct_p2p"]
+            ):
+                break
+            time.sleep(0.02)
+
+        # Проверяем успешность прямого LAN P2P
+        assert guest_proxy.is_direct_p2p is True
+        assert guest_proxy.is_relay_active is False
+        assert guest_proxy._host_active_endpoint == ("127.0.0.1", host_dynamic_port)
+
+        host_g_state = host_bridge._guests.get("lan_g042")
+        assert host_g_state is not None
+        assert host_g_state.is_direct_p2p is True
+        assert host_g_state.is_relay_active is False
+        assert host_g_state.active_endpoint == ("127.0.0.1", guest_dynamic_port)
+
+    finally:
+        host_bridge.stop()
+        guest_proxy.stop()
+        stun.stop()
+
+
+
 

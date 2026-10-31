@@ -286,17 +286,17 @@ def ensure_chronicle_mod_installed(
     mod_dir = target_mods_dir / MOD_FOLDER_NAME
     mod_dir.mkdir(parents=True, exist_ok=True)
 
-    # 1. Запись info.json
+    # 1. Запись info.json (CRLF newline="\r\n" для полной бинарной идентичности контрольных сумм между Windows и macOS)
     info_json_path = mod_dir / "info.json"
     info_content = build_mod_info(factorio_version)
     tmp_info = info_json_path.with_suffix(".tmp")
-    tmp_info.write_text(json.dumps(info_content, indent=2, ensure_ascii=False), encoding="utf-8")
+    tmp_info.write_text(json.dumps(info_content, indent=2, ensure_ascii=False), encoding="utf-8", newline="\r\n")
     tmp_info.replace(info_json_path)
 
-    # 2. Запись control.lua
+    # 2. Запись control.lua (CRLF newline="\r\n" для предотвращения рассинхрона сценариев Factorio между Windows и macOS)
     control_lua_path = mod_dir / "control.lua"
     tmp_control = control_lua_path.with_suffix(".tmp")
-    tmp_control.write_text(CONTROL_LUA_CONTENT, encoding="utf-8")
+    tmp_control.write_text(CONTROL_LUA_CONTENT, encoding="utf-8", newline="\r\n")
     tmp_control.replace(control_lua_path)
 
     # 3. Активация в mod-list.json

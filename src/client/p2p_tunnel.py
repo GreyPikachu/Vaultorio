@@ -381,18 +381,24 @@ class HostP2PBridge:
         """Отправляет HOST_HELLO на STUN-координатор VPS."""
         if not self._s_host:
             return
+        local_s_port = self.factorio_port
+        try:
+            local_s_port = self._s_host.getsockname()[1]
+        except Exception as err:
+            logger.debug(f"Не удалось получить локальный порт сокета Хоста: {err}")
+
         payload = {
             "cmd": "HOST_HELLO",
             "session_token": self.session_token,
             "local_ip": self.local_ip,
-            "local_port": self.factorio_port,
+            "local_port": local_s_port,
             "device_token": self.device_token,
         }
         try:
             packet = encode_control_packet(payload)
             self._s_host.sendto(packet, (self.stun_host, self.stun_port))
             self._last_stun_hello = time.time()
-            logger.debug(f"Отправлен HOST_HELLO на {self.stun_host}:{self.stun_port}")
+            logger.debug(f"Отправлен HOST_HELLO на {self.stun_host}:{self.stun_port} (local_port: {local_s_port})")
         except Exception as err:
             logger.warning(f"Ошибка отправки HOST_HELLO: {err}")
 
@@ -910,19 +916,25 @@ class GuestP2PProxy:
         """Отправляет GUEST_HELLO на STUN-координатор VPS."""
         if not self._s_guest:
             return
+        local_s_port = self.proxy_port
+        try:
+            local_s_port = self._s_guest.getsockname()[1]
+        except Exception as err:
+            logger.debug(f"Не удалось получить локальный порт сокета Гостя: {err}")
+
         payload = {
             "cmd": "GUEST_HELLO",
             "guest_id": self.guest_id,
             "guest_name": self.guest_name,
             "local_ip": self.local_ip,
-            "local_port": self.proxy_port,
+            "local_port": local_s_port,
             "device_token": self.device_token,
         }
         try:
             packet = encode_control_packet(payload)
             self._s_guest.sendto(packet, (self.stun_host, self.stun_port))
             self._last_stun_hello = time.time()
-            logger.debug(f"Отправлен GUEST_HELLO на {self.stun_host}:{self.stun_port}")
+            logger.debug(f"Отправлен GUEST_HELLO на {self.stun_host}:{self.stun_port} (local_port: {local_s_port})")
         except Exception as err:
             logger.warning(f"Ошибка отправки GUEST_HELLO: {err}")
 
