@@ -62,6 +62,14 @@ AI_PERSONA_STYLES: List[Tuple[str, str]] = [
     ("friendly", "Дружеский обзор"),
 ]
 
+# One-click client installer commands for connection guide
+INSTALL_CMD_WINDOWS = (
+    "irm https://raw.githubusercontent.com/GreyPikachu/Vaultorio/main/deploy/install.ps1 | iex"
+)
+INSTALL_CMD_MACOS = (
+    "curl -fsSL https://raw.githubusercontent.com/GreyPikachu/Vaultorio/main/deploy/install.sh | bash"
+)
+
 # Supported timezone offsets (hours from UTC) for cycling in /settings
 DASHBOARD_TIMEZONES: List[Tuple[int, str]] = [
     (0, "UTC (0)"),
@@ -1099,13 +1107,18 @@ class TelegramBotService:
         if os_type == "windows":
             return (
                 "<b>Инструкция по входу в игру (Windows)</b>\n\n"
-                "<b>1. Установка модификации</b>\n"
-                "Откройте <b>PowerShell от имени Администратора</b> (Пуск -> найдите PowerShell -> Запуск от имени администратора) и вставьте команду (нажмите для копирования):\n"
-                "<code>irm https://raw.githubusercontent.com/GreyPikachu/Vaultorio/main/deploy/install.ps1 | iex</code>\n\n"
-                "Дождитесь завершения автоматической установки.\n\n"
+                "<blockquote>\n"
+                "<b>1. Установка модификации в 1 клик</b>\n"
+                "Откройте <b>PowerShell от имени Администратора</b> (Пуск -> найдите PowerShell -> Запуск от имени администратора) и выполните:\n"
+                f"<pre><code class=\"language-powershell\">{INSTALL_CMD_WINDOWS}</code></pre>\n"
+                "<i>(Нажмите на блок с кодом или кнопку под сообщением для копирования)</i>\n"
+                "</blockquote>\n\n"
+                "<blockquote>\n"
                 "<b>2. Запуск и ввод Кода Дружбы</b>\n"
                 "Запустите Factorio как обычно (через Steam или ярлык).\n"
-                "В открывшемся окне настройки введите <b>Код Дружбы</b> (получите у хоста или через команду /invite) и сохраните.\n\n"
+                "В открывшемся окне настройки введите <b>Код Дружбы</b> (получите у хоста или через команду /invite) и сохраните.\n"
+                "</blockquote>\n\n"
+                "<blockquote>\n"
                 "<b>3. Подключение к сессии</b>\n"
                 "Посмотрите статус сервера (в закрепе группы или в уведомлении):\n\n"
                 "• <b>Если сервер [Свободен] (вы заходите первым):</b>\n"
@@ -1113,30 +1126,42 @@ class TelegramBotService:
                 "Вы станете хостом, бот оповестит группу, а сохранения будут уходить в облачный сейф.\n\n"
                 "• <b>Если сервер [В игре!] (хост уже в мире):</b>\n"
                 "В меню игры: <i>Сетевая игра -> Подключиться к адресу</i>.\n"
-                "Адрес прямого P2P-туннеля (<code>127.0.0.1:34198</code>) уже скопирован в буфер обмена! Просто нажмите Вставить (Ctrl+V) и Подключиться."
+                "Адрес прямого P2P-туннеля (<code>127.0.0.1:34198</code>) уже скопирован в буфер обмена! Просто нажмите Вставить (Ctrl+V) и Подключиться.\n"
+                "</blockquote>"
             )
 
         if os_type == "macos":
             return (
                 "<b>Инструкция по входу в игру (macOS)</b>\n\n"
-                "<b>1. Установка модификации</b>\n"
-                "Откройте <b>Терминал</b> (Spotlight -> Terminal) и выполните команду (нажмите для копирования):\n"
-                "<code>curl -fsSL https://raw.githubusercontent.com/GreyPikachu/Vaultorio/main/deploy/install.sh | bash</code>\n\n"
-                "Дождитесь завершения автоматической установки.\n\n"
+                "<blockquote>\n"
+                "<b>1. Установка модификации в 1 клик</b>\n"
+                "Откройте <b>Терминал</b> (Spotlight -> Terminal) и выполните команду:\n"
+                f"<pre><code class=\"language-bash\">{INSTALL_CMD_MACOS}</code></pre>\n"
+                "<i>(Нажмите на блок с кодом или кнопку под сообщением для копирования)</i>\n"
+                "</blockquote>\n\n"
+                "<blockquote>\n"
                 "<b>2. Запуск и ввод Кода Дружбы</b>\n"
-                "Запустите Factorio через Steam или Launchpad. В окне настройки введите ваш <b>Код Дружбы</b> и сохраните.\n\n"
+                "Запустите Factorio через Steam или Launchpad. В окне настройки введите ваш <b>Код Дружбы</b> и сохраните.\n"
+                "</blockquote>\n\n"
+                "<blockquote>\n"
                 "<b>3. Подключение к сессии</b>\n"
                 "• <b>Если сервер [Свободен] (вы первый):</b>\n"
                 "В игре выберите: <i>Сетевая игра -> Запустить игру -> Облачный мир [Cloud]</i>.\n\n"
                 "• <b>Если сервер [В игре!] (хост уже играет):</b>\n"
-                "В игре выберите: <i>Сетевая игра -> Подключиться к адресу</i>. Вставьте адрес из буфера обмена (<code>127.0.0.1:34198</code>) и нажмите Подключиться."
+                "В игре выберите: <i>Сетевая игра -> Подключиться к адресу</i>. Вставьте адрес из буфера обмена (<code>127.0.0.1:34198</code>) и нажмите Подключиться.\n"
+                "</blockquote>"
             )
 
         # Default: os_type == "menu"
         return (
             "<b>Как войти в совместную игру Factorio (Vaultorio)</b>\n\n"
-            "Vaultorio объединяет игроков через прямой P2P-канал в обход NAT и автоматически синхронизирует мир в облачном сейфе.\n\n"
-            "Выберите вашу операционную систему для получения команд установки и пошаговой инструкции:"
+            "<blockquote>\n"
+            "Vaultorio объединяет игроков через прямой P2P-канал в обход NAT и автоматически синхронизирует мир в облачном сейфе на сервере.\n"
+            "• Прямой P2P-туннель без белых IP и Hamachi/Radmin\n"
+            "• Автоматическая синхронизация модов и сохранений\n"
+            "• Защита от Split-Brain и ротация бэкапов\n"
+            "</blockquote>\n\n"
+            "<i>Выберите вашу операционную систему для получения команд установки и пошаговой инструкции:</i>"
         )
 
     def build_join_guide_keyboard(self, os_type: str = "menu") -> Dict[str, Any]:
@@ -1147,6 +1172,7 @@ class TelegramBotService:
         if os_type == "windows":
             return {
                 "inline_keyboard": [
+                    [{"text": "Скопировать команду установки", "copy_text": {"text": INSTALL_CMD_WINDOWS}}],
                     [{"text": "Инструкция для macOS", "callback_data": "guide:macos"}],
                     [
                         {"text": "« К выбору ОС", "callback_data": "guide:menu"},
@@ -1158,6 +1184,7 @@ class TelegramBotService:
         if os_type == "macos":
             return {
                 "inline_keyboard": [
+                    [{"text": "Скопировать команду установки", "copy_text": {"text": INSTALL_CMD_MACOS}}],
                     [{"text": "Инструкция для Windows", "callback_data": "guide:windows"}],
                     [
                         {"text": "« К выбору ОС", "callback_data": "guide:menu"},

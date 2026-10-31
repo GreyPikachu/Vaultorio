@@ -37,6 +37,8 @@ from src.server.stun_coordinator import StunCoordinatorProtocol, start_stun_coor
 from src.server.telegram_bot import (
     AI_EVENT_COOLDOWN_CHOICES,
     DASHBOARD_TIMEZONES,
+    INSTALL_CMD_MACOS,
+    INSTALL_CMD_WINDOWS,
     TelegramBotService,
     TelegramBotSettings,
     format_tz_label,
@@ -49,6 +51,8 @@ __all__ = [
     "AuthManager",
     "DASHBOARD_TIMEZONES",
     "DEFAULT_FREE_VISION_CANDIDATES",
+    "INSTALL_CMD_MACOS",
+    "INSTALL_CMD_WINDOWS",
     "InvalidInviteTicketError",
     "InviteTicketAlreadyUsedError",
     "InviteTicketExpiredError",
