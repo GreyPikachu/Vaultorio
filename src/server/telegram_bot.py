@@ -32,9 +32,19 @@ logger = get_logger("telegram_bot")
 
 # Schedule modes and labels
 AI_SCHEDULE_MODES: List[Tuple[str, str]] = [
+    ("hourly_and_exit", "Каждый час + финал"),
     ("hourly_and_events", "Каждый час + события"),
     ("important_only", "Только важные"),
     ("only_on_exit", "Только финал"),
+]
+
+# Auto-deletion delay choices (seconds, label)
+AUTO_DELETE_TTL_CHOICES: List[Tuple[int, str]] = [
+    (120, "2 мин"),
+    (180, "3 мин"),
+    (300, "5 мин"),
+    (60, "1 мин"),
+    (0, "Выкл"),
 ]
 
 # Persona styles and labels
@@ -91,10 +101,11 @@ class TelegramBotSettings:
     notify_rolling_save: bool = False
     notify_session_end: bool = True
     silent_notifications: bool = False
+    auto_delete_notifications_ttl: int = 120
 
-    # AI Chronicle settings (Task 032)
+    # AI Chronicle settings (Task 032 & Task 041)
     ai_chronicle_enabled: bool = True
-    ai_schedule_mode: str = "hourly_and_events"
+    ai_schedule_mode: str = "hourly_and_exit"
     ai_persona_style: str = "reporter"
     openrouter_api_key: str = ""
     openrouter_model: str = "google/gemini-2.0-flash-exp:free"
@@ -121,6 +132,11 @@ class TelegramBotSettings:
                 filtered["dashboard_tz_offset"] = 3
         if "show_updated_time" in filtered:
             filtered["show_updated_time"] = bool(filtered["show_updated_time"])
+        if "auto_delete_notifications_ttl" in filtered:
+            try:
+                filtered["auto_delete_notifications_ttl"] = max(0, int(filtered["auto_delete_notifications_ttl"]))
+            except (ValueError, TypeError):
+                filtered["auto_delete_notifications_ttl"] = 120
         return cls(**filtered)
 
     def save(self, file_path: Path) -> None:
@@ -233,6 +249,7 @@ class TelegramBotService:
         self._is_polling = False
         self._update_offset = 0
         self._wizard_state: Dict[int, Dict[str, Any]] = {}
+        self._pending_deletions: set[asyncio.Task] = set()
 
     @property
     def is_configured(self) -> bool:
@@ -263,13 +280,63 @@ class TelegramBotService:
         return f"{target_dt.strftime(fmt)} {format_tz_label(offset)}"
 
     async def close(self) -> None:
-        """Stops background tasks and releases HTTP client resources."""
+        """Stops background tasks, cancels pending deletions, and releases HTTP client resources."""
         await self.stop_polling()
+        tasks_to_cancel = [t for t in self._pending_deletions if not t.done()]
+        for task in tasks_to_cancel:
+            task.cancel()
+        if tasks_to_cancel:
+            await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
+        self._pending_deletions.clear()
         if self._owns_client:
             try:
                 await self._client.aclose()
             except Exception as exc:
                 logger.debug("Error closing HTTP client: %s", exc)
+
+    def schedule_message_deletion(
+        self,
+        message_id: int,
+        chat_id: Optional[int | str] = None,
+        delay_sec: Optional[float] = None,
+    ) -> Optional[asyncio.Task]:
+        """
+        Schedules background deletion of a transient notification after delay_sec.
+        Guarantees that pinned live dashboard message is NEVER deleted.
+        """
+        ttl = delay_sec if delay_sec is not None else float(self.settings.auto_delete_notifications_ttl)
+        if ttl <= 0:
+            return None
+
+        # Absolute protection: never schedule deletion of pinned message
+        if self.settings.pinned_message_id and message_id == self.settings.pinned_message_id:
+            logger.debug("Refusing to schedule deletion for pinned message %s", message_id)
+            return None
+
+        target_chat = chat_id or self.settings.chat_id
+        if not target_chat:
+            return None
+
+        async def _delayed_delete_worker() -> None:
+            try:
+                await asyncio.sleep(ttl)
+                # Re-verify pinned protection before final deletion
+                if self.settings.pinned_message_id and message_id == self.settings.pinned_message_id:
+                    logger.debug("Aborting deletion of message %s as it became pinned", message_id)
+                    return
+                await self.delete_message(message_id=message_id, chat_id=target_chat)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.debug("Error in delayed message deletion for msg %s: %s", message_id, exc)
+
+        try:
+            task = asyncio.create_task(_delayed_delete_worker())
+            self._pending_deletions.add(task)
+            task.add_done_callback(self._pending_deletions.discard)
+            return task
+        except RuntimeError:
+            return None
 
     # --------------------------------------------------------------------------
     # Telegram Bot API Methods
@@ -282,6 +349,8 @@ class TelegramBotService:
         reply_markup: Optional[Dict[str, Any]] = None,
         disable_notification: Optional[bool] = None,
         parse_mode: str = "HTML",
+        auto_delete: bool = False,
+        auto_delete_delay: Optional[float] = None,
     ) -> Optional[Dict[str, Any]]:
         """
         Sends an HTML-formatted message to the specified or configured chat.
@@ -292,6 +361,8 @@ class TelegramBotService:
             reply_markup: Optional inline keyboard markup.
             disable_notification: Sends message silently if True.
             parse_mode: Formatting mode ('HTML' by default).
+            auto_delete: If True, schedules auto-deletion of this message after configured TTL.
+            auto_delete_delay: Custom delay in seconds (falls back to settings.auto_delete_notifications_ttl).
 
         Returns:
             Dict[str, Any] representing sent Message, or None on failure.
@@ -324,7 +395,17 @@ class TelegramBotService:
             if not data.get("ok"):
                 logger.error("sendMessage failed: %s", data.get("description"))
                 return None
-            return data.get("result")
+            result_msg = data.get("result")
+            if auto_delete and isinstance(result_msg, dict):
+                sent_msg_id = result_msg.get("message_id")
+                if sent_msg_id:
+                    sent_chat_id = result_msg.get("chat", {}).get("id") or target_chat
+                    self.schedule_message_deletion(
+                        message_id=sent_msg_id,
+                        chat_id=sent_chat_id,
+                        delay_sec=auto_delete_delay,
+                    )
+            return result_msg
         except Exception as exc:
             logger.error("Network error during sendMessage: %s", exc)
             return None
@@ -595,7 +676,7 @@ class TelegramBotService:
         try:
             if self.settings.notify_host_start:
                 text = f"<b>[СЕРВЕР]</b> Игрок <b>{html.escape(host_name)}</b> запустил игру!"
-                await self.send_message(text=text)
+                await self.send_message(text=text, auto_delete=True)
             await self.update_dashboard(force=True)
         except Exception as exc:
             logger.error("Error in notify_host_started: %s", exc)
@@ -613,7 +694,7 @@ class TelegramBotService:
         try:
             if self.settings.notify_guest_join:
                 text = f"<b>[СЕРВЕР]</b> Игрок <b>{html.escape(guest_name)}</b> подключился к игре."
-                await self.send_message(text=text)
+                await self.send_message(text=text, auto_delete=True)
             await self.update_dashboard(force=True)
         except Exception as exc:
             logger.error("Error in notify_guest_joined: %s", exc)
@@ -631,7 +712,7 @@ class TelegramBotService:
         try:
             if self.settings.notify_guest_leave:
                 text = f"<b>[СЕРВЕР]</b> Игрок <b>{html.escape(guest_name)}</b> покинул игру."
-                await self.send_message(text=text)
+                await self.send_message(text=text, auto_delete=True)
             await self.update_dashboard(force=True)
         except Exception as exc:
             logger.error("Error in notify_guest_left: %s", exc)
@@ -659,7 +740,7 @@ class TelegramBotService:
                     f"<b>[СЕЙВ]</b> Автосейв v{version} ({size_mb:.1f} МБ) сохранен в сейф.\n"
                     f"Игрок: <b>{html.escape(uploaded_by)}</b>"
                 )
-                await self.send_message(text=text)
+                await self.send_message(text=text, auto_delete=True)
             await self.update_dashboard(force=True)
         except Exception as exc:
             logger.error("Error in notify_rolling_save_saved: %s", exc)
@@ -698,7 +779,7 @@ class TelegramBotService:
                     f"<b>[СЕРВЕР]</b> Сессия завершена. Мир успешно выгружен в сейф.\n"
                     f"{body_lines}"
                 )
-                await self.send_message(text=text)
+                await self.send_message(text=text, auto_delete=True)
             await self.update_dashboard(force=True)
         except Exception as exc:
             logger.error("Error in notify_session_ended: %s", exc)
@@ -728,7 +809,7 @@ class TelegramBotService:
                 f"<b>[СЕЙФ]</b> Мир <b>{w_name} [Cloud]</b> убран с сервера в архив (игрок: <b>{p_name}</b>).\n"
                 "Сейчас на сервере не выбран никакой сейф — слот свободен для выбора или загрузки другого мира."
             )
-            await self.send_message(text=text)
+            await self.send_message(text=text, auto_delete=True)
             await self.update_dashboard(force=True)
         except Exception as exc:
             logger.error("Error in notify_world_archived: %s", exc)
@@ -1088,7 +1169,11 @@ class TelegramBotService:
     @staticmethod
     def get_setting_subpage(field_name: str) -> str:
         """Determines which settings submenu a setting belongs to."""
-        if field_name.startswith("notify_") or field_name == "silent_notifications":
+        if (
+            field_name.startswith("notify_")
+            or field_name == "silent_notifications"
+            or field_name == "auto_delete_notifications_ttl"
+        ):
             return "notifications"
         if field_name in (
             "live_dashboard_enabled",
@@ -1142,6 +1227,11 @@ class TelegramBotService:
         )
 
         if subpage == "notifications":
+            ttl_map = dict(AUTO_DELETE_TTL_CHOICES)
+            curr_ttl_label = ttl_map.get(
+                self.settings.auto_delete_notifications_ttl,
+                f"{self.settings.auto_delete_notifications_ttl}с",
+            )
             keyboard = [
                 [
                     {
@@ -1171,6 +1261,12 @@ class TelegramBotService:
                     {
                         "text": toggle_label("Без звука", self.settings.silent_notifications),
                         "callback_data": "toggle:silent_notifications",
+                    },
+                ],
+                [
+                    {
+                        "text": f"Автоочистка: {curr_ttl_label}",
+                        "callback_data": "cycle:auto_delete_notifications_ttl",
                     },
                 ],
                 [
@@ -1929,6 +2025,12 @@ class TelegramBotService:
                 self.settings.dashboard_tz_offset = next_offset
                 self.save_settings()
                 await self.update_dashboard(force=True)
+            elif field_name == "auto_delete_notifications_ttl":
+                ttls = [item[0] for item in AUTO_DELETE_TTL_CHOICES]
+                curr_idx = ttls.index(self.settings.auto_delete_notifications_ttl) if self.settings.auto_delete_notifications_ttl in ttls else 0
+                next_ttl = ttls[(curr_idx + 1) % len(ttls)]
+                self.settings.auto_delete_notifications_ttl = next_ttl
+                self.save_settings()
 
             subpage = self.get_setting_subpage(field_name)
             if msg_id and chat_id and msg_id != self.settings.pinned_message_id:

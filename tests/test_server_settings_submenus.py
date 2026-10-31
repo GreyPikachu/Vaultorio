@@ -104,10 +104,10 @@ class TestTelegramSettingsSubmenus(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Выберите категорию", text)
 
     def test_notifications_submenu_structure_and_buttons(self):
-        """Verifies notifications submenu contains all 6 notification toggles and back button."""
+        """Verifies notifications submenu contains all notification toggles, auto-delete, and back button."""
         kb = self.bot.build_settings_keyboard(subpage="notifications")
         rows = kb.get("inline_keyboard", [])
-        self.assertEqual(len(rows), 4)
+        self.assertEqual(len(rows), 5)
 
         buttons = {b["callback_data"]: b["text"] for row in rows for b in row}
         self.assertIn("toggle:notify_host_start", buttons)
@@ -116,6 +116,7 @@ class TestTelegramSettingsSubmenus(unittest.IsolatedAsyncioTestCase):
         self.assertIn("toggle:notify_guest_leave", buttons)
         self.assertIn("toggle:notify_rolling_save", buttons)
         self.assertIn("toggle:silent_notifications", buttons)
+        self.assertIn("cycle:auto_delete_notifications_ttl", buttons)
         self.assertIn("menu:main", buttons)
         self.assertEqual(buttons["menu:main"], "« Назад")
 

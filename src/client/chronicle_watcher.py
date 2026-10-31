@@ -36,7 +36,7 @@ class ChronicleWatcher:
         session_token: Optional[str] = None,
         log_path: Optional[Path | str] = None,
         poll_interval_sec: float = 2.0,
-        important_cooldown_sec: float = 300.0,
+        important_cooldown_sec: float = 1800.0,
         hourly_interval_sec: float = 3600.0,
         wait_screenshot_sec: float = 2.0,
         is_confirmed_getter: Optional[Callable[[], bool]] = None,

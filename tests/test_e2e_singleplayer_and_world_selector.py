@@ -106,6 +106,7 @@ def setup_e2e_client(
         config=client_config,
         env=env,
         hub_client=hub_client,
+        shift_detector=lambda: False,
     )
     return orchestrator, env, hub_client
 

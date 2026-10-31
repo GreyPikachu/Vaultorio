@@ -124,7 +124,7 @@ class TestTelegramBotSettings(unittest.TestCase):
         self.assertTrue(settings.notify_session_end)
         self.assertFalse(settings.silent_notifications)
         self.assertTrue(settings.ai_chronicle_enabled)
-        self.assertEqual(settings.ai_schedule_mode, "hourly_and_events")
+        self.assertEqual(settings.ai_schedule_mode, "hourly_and_exit")
         self.assertEqual(settings.ai_persona_style, "reporter")
 
     def test_settings_save_and_load(self):
@@ -380,17 +380,22 @@ class TestTelegramBotServiceAsync(unittest.IsolatedAsyncioTestCase):
             "message": {"message_id": 99, "chat": {"id": 12345}},
         }
 
-        # Cycle 1: hourly_and_events -> important_only
+        # Cycle 1: hourly_and_exit -> hourly_and_events
+        bot.settings.ai_schedule_mode = "hourly_and_exit"
+        await bot.handle_callback_query(cb_query)
+        self.assertEqual(bot.settings.ai_schedule_mode, "hourly_and_events")
+
+        # Cycle 2: hourly_and_events -> important_only
         await bot.handle_callback_query(cb_query)
         self.assertEqual(bot.settings.ai_schedule_mode, "important_only")
 
-        # Cycle 2: important_only -> only_on_exit
+        # Cycle 3: important_only -> only_on_exit
         await bot.handle_callback_query(cb_query)
         self.assertEqual(bot.settings.ai_schedule_mode, "only_on_exit")
 
-        # Cycle 3: only_on_exit -> hourly_and_events
+        # Cycle 4: only_on_exit -> hourly_and_exit
         await bot.handle_callback_query(cb_query)
-        self.assertEqual(bot.settings.ai_schedule_mode, "hourly_and_events")
+        self.assertEqual(bot.settings.ai_schedule_mode, "hourly_and_exit")
 
     async def test_settings_menu_admin_authorization(self):
         """Verifies that non-admin users cannot alter settings when admin_user_ids is configured."""

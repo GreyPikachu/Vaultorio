@@ -346,9 +346,11 @@ def should_process_report(trigger_type: str, settings: Optional[TelegramBotSetti
         logger.debug("ИИ-хроника отключена в настройках бота (ai_chronicle_enabled=False).")
         return False
 
-    schedule_mode = getattr(settings, "ai_schedule_mode", "hourly_and_events")
+    schedule_mode = getattr(settings, "ai_schedule_mode", "hourly_and_exit")
 
-    if schedule_mode == "hourly_and_events":
+    if schedule_mode == "hourly_and_exit":
+        return trigger_type in ("hourly_summary", "session_summary")
+    elif schedule_mode == "hourly_and_events":
         return trigger_type in ("important_event", "hourly_summary", "session_summary")
     elif schedule_mode == "important_only":
         return trigger_type in ("important_event", "session_summary")
